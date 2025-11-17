@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { router } from 'expo-router';
@@ -18,9 +19,72 @@ export default function SettingsScreen() {
   const { profile, signOut, refreshProfile } = useAuth();
   const [pushEnabled, setPushEnabled] = useState(profile?.push_opt_in ?? true);
 
+  // Live stats
+  const [ratsSubmitted, setRatsSubmitted] = useState<number | null>(null);
+  const [ratingsGiven, setRatingsGiven] = useState<number | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+
   useEffect(() => {
     setPushEnabled(profile?.push_opt_in ?? true);
-  }, [profile]);
+  }, [profile?.push_opt_in]);
+
+  const loadStats = useCallback(async () => {
+    if (!profile?.id) return;
+
+    try {
+      setStatsLoading(true);
+
+      // Rats submitted by this user
+      const {
+        count: ratsCount,
+        error: ratsError,
+      } = await supabase
+        .from('rats')
+        .select('id', { head: true, count: 'exact' })
+        .eq('owner_id', profile.id);
+
+      if (ratsError) {
+        console.error('Error counting rats_submitted', ratsError);
+      } else if (typeof ratsCount === 'number') {
+        setRatsSubmitted(ratsCount);
+      }
+
+      // Ratings given by this user
+      const {
+        count: ratingsCount,
+        error: ratingsError,
+      } = await supabase
+        .from('rat_ratings')
+        .select('id', { head: true, count: 'exact' })
+        .eq('rater_id', profile.id);
+
+      if (ratingsError) {
+        console.error('Error counting ratings_given', ratingsError);
+      } else if (typeof ratingsCount === 'number') {
+        setRatingsGiven(ratingsCount);
+      }
+    } catch (error) {
+      console.error('Error loading stats:', error);
+    } finally {
+      setStatsLoading(false);
+    }
+  }, [profile?.id]);
+
+  // Run when profile first exists
+  useEffect(() => {
+    if (profile?.id) {
+      loadStats();
+    }
+  }, [profile?.id, loadStats]);
+
+  // Run again whenever Settings tab is focused
+  useFocusEffect(
+    useCallback(() => {
+      if (profile?.id) {
+        loadStats();
+      }
+    }, [profile?.id, loadStats])
+  );
 
   const handlePushToggle = async (value: boolean) => {
     setPushEnabled(value);
@@ -47,6 +111,18 @@ export default function SettingsScreen() {
   };
 
   const hasBloodRed = profile?.entitlements?.blood_red || false;
+  const currentStreak = profile?.streak_current ?? 0;
+  const bestStreak = profile?.streak_best ?? 0;
+
+  const ratsSubmittedDisplay =
+    ratsSubmitted ??
+    profile?.stats?.rats_submitted ??
+    0;
+
+  const ratingsGivenDisplay =
+    ratingsGiven ??
+    profile?.stats?.ratings_given ??
+    0;
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -66,25 +142,25 @@ export default function SettingsScreen() {
             <View style={styles.statRow}>
               <Flame size={20} color="#FF6B35" />
               <Text style={styles.statLabel}>Current Streak</Text>
-              <Text style={styles.statValue}>{profile?.streak_current || 0}</Text>
+              <Text style={styles.statValue}>{currentStreak}</Text>
             </View>
             <View style={styles.statRow}>
               <Flame size={20} color="#FFD700" />
               <Text style={styles.statLabel}>Best Streak</Text>
-              <Text style={styles.statValue}>{profile?.streak_best || 0}</Text>
+              <Text style={styles.statValue}>{bestStreak}</Text>
             </View>
             <View style={styles.statRow}>
               <Award size={20} color="#FFFFFF" />
               <Text style={styles.statLabel}>Rats Submitted</Text>
               <Text style={styles.statValue}>
-                {profile?.stats?.rats_submitted || 0}
+                {statsLoading && ratsSubmitted === null ? '…' : ratsSubmittedDisplay}
               </Text>
             </View>
             <View style={styles.statRow}>
               <Award size={20} color="#FFFFFF" />
-              <Text style={styles.statLabel}>Ratings Given</Text>
+              <Text style={styles.statLabel}>Rats Rated</Text>
               <Text style={styles.statValue}>
-                {profile?.stats?.ratings_given || 0}
+                {statsLoading && ratingsGiven === null ? '…' : ratingsGivenDisplay}
               </Text>
             </View>
           </View>
@@ -161,22 +237,15 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#000000',
-  },
-  scrollContent: {
-    padding: 16,
-  },
+  container: { flex: 1, backgroundColor: '#000000' },
+  scrollContent: { padding: 16 },
   title: {
     fontSize: 28,
     fontWeight: 'bold',
     color: '#FFFFFF',
     marginBottom: 24,
   },
-  section: {
-    marginBottom: 24,
-  },
+  section: { marginBottom: 24 },
   sectionTitle: {
     fontSize: 14,
     fontWeight: '600',
@@ -224,10 +293,7 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     marginLeft: 12,
   },
-  menuItemArrow: {
-    fontSize: 24,
-    color: '#666666',
-  },
+  menuItemArrow: { fontSize: 24, color: '#666666' },
   price: {
     fontSize: 16,
     fontWeight: '600',
@@ -239,10 +305,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 4,
   },
-  settingLabel: {
-    fontSize: 16,
-    color: '#FFFFFF',
-  },
+  settingLabel: { fontSize: 16, color: '#FFFFFF' },
   signOutButton: {
     flexDirection: 'row',
     alignItems: 'center',

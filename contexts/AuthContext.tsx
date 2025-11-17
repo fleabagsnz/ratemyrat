@@ -2,21 +2,23 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
 
+type ProfileStats = {
+  rats_submitted: number;
+  ratings_given: number;
+  ratings_received: number;
+  avg_rating_received: number;
+};
+
 type Profile = {
   id: string;
   username: string;
   is_banned: boolean;
   is_admin: boolean;
   push_opt_in: boolean;
-  entitlements: Record<string, boolean>;
+  entitlements: Record<string, boolean> | null;
   streak_current: number;
   streak_best: number;
-  stats: {
-    rats_submitted: number;
-    ratings_given: number;
-    ratings_received: number;
-    avg_rating_received: number;
-  };
+  stats: ProfileStats | null;
 };
 
 type AuthContextType = {
@@ -38,11 +40,11 @@ const AuthContext = createContext<AuthContextType>({
 });
 
 export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (!context) {
+  const ctx = useContext(AuthContext);
+  if (!ctx) {
     throw new Error('useAuth must be used within an AuthProvider');
   }
-  return context;
+  return ctx;
 };
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
@@ -53,6 +55,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const normalizeProfile = (raw: any): Profile => {
+    return {
+      id: raw.id,
+      username: raw.username,
+      is_banned: raw.is_banned ?? false,
+      is_admin: raw.is_admin ?? false,
+      push_opt_in: raw.push_opt_in ?? true,
+      entitlements: raw.entitlements ?? {},
+      streak_current: raw.streak_current ?? 0,
+      streak_best: raw.streak_best ?? 0,
+      stats: raw.stats ?? {
+        rats_submitted: 0,
+        ratings_given: 0,
+        ratings_received: 0,
+        avg_rating_received: 0,
+      },
+    };
+  };
+
   const fetchProfile = async (userId: string) => {
     const { data, error } = await supabase
       .from('profiles')
@@ -60,57 +81,92 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       .eq('id', userId)
       .maybeSingle();
 
-    if (data && !error) {
-      setProfile(data as Profile);
+    if (error) {
+      console.error('Error fetching profile:', error);
+      return;
+    }
+
+    if (data) {
+      setProfile(normalizeProfile(data));
+    } else {
+      setProfile(null);
     }
   };
 
   const refreshProfile = async () => {
-    if (user) {
+    if (user?.id) {
       await fetchProfile(user.id);
     }
   };
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        fetchProfile(session.user.id);
-      }
-      setLoading(false);
-    });
+    let isMounted = true;
 
-    const { data: authListener } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
+    const init = async () => {
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (!isMounted) return;
+
+        setSession(data.session ?? null);
+        setUser(data.session?.user ?? null);
+
+        if (data.session?.user) {
+          await fetchProfile(data.session.user.id);
+        }
+      } catch (e) {
+        console.error('Error initializing auth:', e);
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    init();
+
+    const { data: subscription } = supabase.auth.onAuthStateChange(
+      (_event, newSession) => {
         (async () => {
-          setSession(session);
-          setUser(session?.user ?? null);
-          if (session?.user) {
-            await fetchProfile(session.user.id);
+          setSession(newSession);
+          setUser(newSession?.user ?? null);
+
+          if (newSession?.user) {
+            await fetchProfile(newSession.user.id);
           } else {
             setProfile(null);
           }
+
           setLoading(false);
         })();
       }
     );
 
     return () => {
-      authListener.subscription.unsubscribe();
+      isMounted = false;
+      subscription.subscription.unsubscribe();
     };
   }, []);
 
   const signOut = async () => {
-    await supabase.auth.signOut();
-    setSession(null);
-    setUser(null);
-    setProfile(null);
+    try {
+      await supabase.auth.signOut();
+    } finally {
+      setSession(null);
+      setUser(null);
+      setProfile(null);
+    }
   };
 
   return (
     <AuthContext.Provider
-      value={{ session, user, profile, loading, signOut, refreshProfile }}
+      value={{
+        session,
+        user,
+        profile,
+        loading,
+        signOut,
+        refreshProfile,
+      }}
     >
       {children}
     </AuthContext.Provider>

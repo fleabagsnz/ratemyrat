@@ -1,40 +1,62 @@
-import React, { useState, useEffect } from 'react';
+// app/(tabs)/draw.tsx
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
   ScrollView,
+  TouchableOpacity,
   TextInput,
-  Alert,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { captureRef } from 'react-native-view-shot';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { DrawingCanvas } from '@/components/DrawingCanvas';
-import { Undo, Trash2 } from 'lucide-react-native';
+import { Trash2 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
+import { useBadgeAwards } from '@/hooks/useBadgeAwards';
+import { BadgeUnlockedModal } from '@/components/BadgeUnlockedModal';
 
 const COLORS = {
   black: '#000000',
   white: '#FFFFFF',
+  grey: '#888888',
   brown: '#6B4E2E',
-  red: '#8B0000',
+  pink: '#FF9CB5',
+  mutedYellow: '#D9C36A',
 };
 
 const BRUSH_SIZES = [4, 8, 16];
 
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binaryString = global.atob ? global.atob(base64) : atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
 export default function DrawScreen() {
   const { user } = useAuth();
+  const canvasRef = useRef<View>(null);
+
   const [hasDrawnToday, setHasDrawnToday] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [selectedColor, setSelectedColor] = useState(COLORS.white);
   const [brushSize, setBrushSize] = useState(BRUSH_SIZES[1]);
-  const [tool, setTool] = useState<'brush' | 'eraser'>('brush');
-  const [paths, setPaths] = useState<string[]>([]);
   const [title, setTitle] = useState('');
+  const [hasAnyStroke, setHasAnyStroke] = useState(false);
+  const [scrollEnabled, setScrollEnabled] = useState(true);
+  const [canvasKey, setCanvasKey] = useState(0); // force remount on clear
+
+  // BADGE HOOK
+  const { awardBadge, latestBadge, clearLatestBadge } = useBadgeAwards();
 
   useEffect(() => {
     checkIfDrawnToday();
@@ -49,94 +71,92 @@ export default function DrawScreen() {
         .eq('owner_id', user?.id)
         .gte('created_at', `${today}T00:00:00`)
         .maybeSingle();
-
       setHasDrawnToday(!!data);
-    } catch (error) {
-      console.error('Error checking daily rat:', error);
+    } catch (e) {
+      console.error(e);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleUndo = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setPaths(paths.slice(0, -1));
-  };
-
   const handleClear = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    Alert.alert('Clear Canvas', 'Are you sure you want to clear your drawing?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Clear', style: 'destructive', onPress: () => setPaths([]) },
-    ]);
+    setHasAnyStroke(false);
+    setTitle('');
+    setCanvasKey((k) => k + 1);
+    setScrollEnabled(true);
   };
 
   const handleSubmit = async () => {
     if (!user) {
-      Alert.alert('Error', 'You must be signed in to submit a rat.');
+      Alert.alert('Error', 'You must be signed in.');
       return;
     }
-
-    if (paths.length === 0) {
-      Alert.alert('Error', 'Please draw something before submitting.');
+    if (!canvasRef.current) {
+      Alert.alert('Error', 'Canvas not ready.');
+      return;
+    }
+    if (!hasAnyStroke) {
+      Alert.alert('Error', 'Please draw something first.');
       return;
     }
 
     setSubmitting(true);
 
     try {
-      // Convert strokes to SVG markup
-      const svgData = `<svg width="1024" height="1024" xmlns="http://www.w3.org/2000/svg"><rect width="1024" height="1024" fill="#000000"/>${paths
-        .map(
-          (p) =>
-            `<path d="${p}" stroke="${selectedColor}" stroke-width="${brushSize}" stroke-linecap="round" stroke-linejoin="round" fill="none"/>`
-        )
-        .join('')}</svg>`;
+      // 1. Capture the canvas as base64 PNG
+      const base64 = await captureRef(canvasRef, {
+        format: 'png',
+        quality: 1,
+        result: 'base64',
+      });
 
-      const blob = new Blob([svgData], { type: 'image/svg+xml' });
-      const fileName = `${user.id}_${Date.now()}.svg`;
+      // 2. Convert base64 → bytes
+      const bytes = base64ToUint8Array(base64);
+      const filePath = `${user.id}/${Date.now()}.png`;
 
+      // 3. Upload to Supabase storage
       const { error: uploadError } = await supabase.storage
         .from('rats')
-        .upload(fileName, blob, {
-          contentType: 'image/svg+xml',
-          upsert: true,
+        .upload(filePath, bytes, {
+          contentType: 'image/png',
         });
 
       if (uploadError) throw uploadError;
 
-      const { data: urlData } = supabase.storage
+      const { data: publicUrlData } = supabase.storage
         .from('rats')
-        .getPublicUrl(fileName);
+        .getPublicUrl(filePath);
 
-      const image_url = urlData.publicUrl;
+      const imageUrl = publicUrlData.publicUrl;
 
-      // Insert the new rat
+      // 4. Insert rat row
       const { error: insertError } = await supabase.from('rats').insert({
-        owner_id: user.id,
-        image_url,
+        image_url: imageUrl,
         title: title.trim() || null,
-        tags: [],
-        creation_tool: 'drawing_canvas_v1',
+        creation_tool: 'png_canvas_v1',
         moderation_state: 'approved',
         avg_rating: 0,
       });
 
       if (insertError) throw insertError;
 
+      // 5. Award "Baby’s First Rat" badge
+      // NOTE: slug must match badges.slug in DB, e.g. "baby-first-rat"
+      if (awardBadge) {
+        await awardBadge('baby-first-rat');
+      }
+
       Alert.alert('Success', 'Your rat has been submitted!', [
         {
           text: 'OK',
           onPress: () => {
-            setPaths([]);
-            setTitle('');
             setHasDrawnToday(true);
           },
         },
       ]);
-    } catch (error: any) {
-      console.error('Rat submission error:', error);
-      Alert.alert('Error', error.message || 'Something went wrong.');
+    } catch (err: any) {
+      console.error('submit error', err);
+      Alert.alert('Error', err.message || 'Could not submit.');
     } finally {
       setSubmitting(false);
     }
@@ -145,104 +165,165 @@ export default function DrawScreen() {
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#FFFFFF" />
+        <ActivityIndicator color="#fff" />
       </View>
     );
   }
 
   if (hasDrawnToday) {
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const hoursLeft = Math.floor(
-      (tomorrow.getTime() - Date.now()) / (1000 * 60 * 60)
-    );
-
     return (
-      <SafeAreaView style={styles.container} edges={['top']}>
+      <SafeAreaView style={styles.container}>
         <View style={styles.lockedContainer}>
-          <Text style={styles.lockedTitle}>You've drawn today!</Text>
-          <Text style={styles.lockedText}>
-            Come back in {hoursLeft} hours to draw again.
-          </Text>
+          <Text style={styles.lockedTitle}>You've done a rat today.</Text>
+          <Text style={styles.lockedText}>Come rat tomorrow.</Text>
         </View>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <ScrollView contentContainerStyle={styles.scrollContent}>
+    <SafeAreaView style={styles.container}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        scrollEnabled={scrollEnabled}
+      >
         <Text style={styles.title}>Draw Your Rat</Text>
 
         <View style={styles.canvasContainer}>
           <DrawingCanvas
+            key={canvasKey}
+            ref={canvasRef}
             color={selectedColor}
             brushSize={brushSize}
-            tool={tool}
-            onPathsChange={setPaths}
+            tool="brush"
+            onStroke={() => setHasAnyStroke(true)}
+            onDrawingStart={() => setScrollEnabled(false)}
+            onDrawingEnd={() => setScrollEnabled(true)}
           />
         </View>
 
-        <View style={styles.actionRow}>
-          <TouchableOpacity
-            style={styles.iconButton}
-            onPress={handleUndo}
-            disabled={paths.length === 0}
-          >
-            <Undo size={20} color={paths.length === 0 ? '#333' : '#fff'} />
-          </TouchableOpacity>
+        {/* Colors */}
+        <Text style={styles.sectionLabel}>Colour</Text>
+        <View style={styles.row}>
+          {Object.entries(COLORS).map(([key, value]) => (
+            <TouchableOpacity
+              key={key}
+              style={[
+                styles.colorButton,
+                { backgroundColor: value },
+                selectedColor === value && styles.colorButtonActive,
+              ]}
+              onPressIn={() => setScrollEnabled(false)}
+              onPress={() => {
+                setSelectedColor(value);
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              }}
+              onPressOut={() => setScrollEnabled(true)}
+            />
+          ))}
+        </View>
 
-          <TouchableOpacity
-            style={styles.iconButton}
-            onPress={handleClear}
-            disabled={paths.length === 0}
-          >
-            <Trash2 size={20} color={paths.length === 0 ? '#333' : '#fff'} />
+        {/* Brush sizes */}
+        <Text style={styles.sectionLabel}>Brush</Text>
+        <View style={styles.row}>
+          {BRUSH_SIZES.map((size) => (
+            <TouchableOpacity
+              key={size}
+              style={[
+                styles.sizeButton,
+                brushSize === size && styles.sizeButtonActive,
+              ]}
+              onPressIn={() => setScrollEnabled(false)}
+              onPress={() => {
+                setBrushSize(size);
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              }}
+              onPressOut={() => setScrollEnabled(true)}
+            >
+              <View
+                style={{
+                  width: size,
+                  height: size,
+                  borderRadius: size / 2,
+                  backgroundColor: '#fff',
+                }}
+              />
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* Clear */}
+        <View style={styles.actionRow}>
+          <TouchableOpacity style={styles.iconButton} onPress={handleClear}>
+            <Trash2 size={20} color="#fff" />
           </TouchableOpacity>
         </View>
 
+        {/* Title */}
         <TextInput
           style={styles.titleInput}
           value={title}
           onChangeText={setTitle}
           placeholder="Add a title (optional)"
           placeholderTextColor="#666"
-          maxLength={40}
         />
 
+        {/* Submit */}
         <TouchableOpacity
-          style={[styles.submitButton, submitting && styles.submitButtonDisabled]}
+          style={[styles.submitButton, submitting && { opacity: 0.5 }]}
           onPress={handleSubmit}
-          disabled={submitting || paths.length === 0}
+          disabled={submitting}
         >
           {submitting ? (
             <ActivityIndicator color="#fff" />
           ) : (
-            <Text style={styles.submitButtonText}>Submit Rat</Text>
+            <Text style={styles.submitButtonText}>Submit rat</Text>
           )}
         </TouchableOpacity>
       </ScrollView>
+
+      {/* Badge popup */}
+      <BadgeUnlockedModal
+        visible={!!latestBadge}
+        badge={latestBadge}
+        onClose={clearLatestBadge}
+      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  scrollContent: { padding: 16 },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 16,
-  },
-  canvasContainer: { alignItems: 'center', marginBottom: 24 },
-  actionRow: {
-    flexDirection: 'row',
-    gap: 12,
+  loadingContainer: {
+    flex: 1,
     justifyContent: 'center',
-    marginBottom: 16,
+    alignItems: 'center',
+    backgroundColor: '#000',
   },
+  scroll: { padding: 16, paddingBottom: 40 },
+  title: { fontSize: 28, fontWeight: 'bold', color: '#fff', marginBottom: 16 },
+  canvasContainer: { marginBottom: 24 },
+  row: { flexDirection: 'row', gap: 12, flexWrap: 'wrap', marginBottom: 12 },
+  colorButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  colorButtonActive: { borderColor: '#fff' },
+  sizeButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    backgroundColor: '#1A1A1A',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  sizeButtonActive: { borderColor: '#6B4E2E' },
+  actionRow: { flexDirection: 'row', gap: 12, marginBottom: 16 },
   iconButton: {
     width: 44,
     height: 44,
@@ -257,7 +338,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     color: '#fff',
-    fontSize: 16,
     marginBottom: 16,
   },
   submitButton: {
@@ -266,19 +346,14 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     alignItems: 'center',
   },
-  submitButtonDisabled: { opacity: 0.5 },
-  submitButtonText: { color: '#fff', fontSize: 18, fontWeight: '600' },
+  submitButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   lockedContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 32,
   },
-  lockedTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 12,
-  },
-  lockedText: { fontSize: 16, color: '#999', textAlign: 'center' },
+  lockedTitle: { color: '#fff', fontSize: 22, marginBottom: 8 },
+  lockedText: { color: '#999' },
+  sectionLabel: { color: '#fff', marginBottom: 4, fontWeight: '600' },
 });

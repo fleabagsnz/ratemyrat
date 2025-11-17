@@ -1,354 +1,273 @@
-import React, { useState, useEffect } from 'react';
+// app/rat/[id].tsx
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   Image,
-  ScrollView,
-  TouchableOpacity,
   ActivityIndicator,
+  TouchableOpacity,
   Alert,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
-import { X, Flag, Star } from 'lucide-react-native';
-import * as Haptics from 'expo-haptics';
-import { trackEvent } from '@/lib/analytics';
 
 type Rat = {
   id: string;
-  title: string | null;
   image_url: string;
-  ratings_count: number;
-  ratings_sum: number;
-  created_at: string;
+  title: string | null;
   owner_id: string;
 };
 
-type EmojiReaction = {
-  id: string;
-  emoji: string;
-  reactor_id: string;
-};
-
-const EMOJI_OPTIONS = ['❤️', '😂', '😍', '🔥', '👏', '🎉', '😮', '👍'];
-
 export default function RatDetailScreen() {
-  const { id } = useLocalSearchParams();
+  const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
+
   const [rat, setRat] = useState<Rat | null>(null);
-  const [reactions, setReactions] = useState<EmojiReaction[]>([]);
   const [loading, setLoading] = useState(true);
+  const [myRating, setMyRating] = useState<number | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    fetchRatDetails();
-    trackEvent('rat_viewed_fullscreen', { rat_id: id });
-
-    const channel = supabase
-      .channel(`rat:${id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'ratings',
-          filter: `rat_id=eq.${id}`,
-        },
-        () => {
-          fetchRatDetails();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    if (!id) return;
+    fetchRat(id as string);
   }, [id]);
 
-  const fetchRatDetails = async () => {
+  const fetchRat = async (ratId: string) => {
     try {
-      const { data: ratData, error: ratError } = await supabase
+      // 1) load the rat itself
+      const { data, error } = await supabase
         .from('rats')
-        .select('*')
-        .eq('id', id)
-        .single();
+        .select('id, image_url, title, owner_id')
+        .eq('id', ratId)
+        .maybeSingle();
 
-      if (ratError) throw ratError;
-      setRat(ratData);
+      if (error) throw error;
+      if (!data) {
+        Alert.alert('Error', 'Rat not found');
+        router.back();
+        return;
+      }
 
-      const { data: reactionsData } = await supabase
-        .from('emoji_reactions')
-        .select('*')
-        .eq('rat_id', id);
+      setRat(data);
 
-      setReactions(reactionsData || []);
-    } catch (error) {
-      console.error('Error fetching rat details:', error);
+      // 2) load *my* rating if logged in
+      if (user?.id) {
+        const { data: ratingData, error: ratingError } = await supabase
+          .from('rat_ratings')
+          .select('rating')
+          .eq('rat_id', ratId)
+          .eq('rater_id', user.id) // IMPORTANT: rater_id
+          .maybeSingle();
+
+        if (!ratingError && ratingData) {
+          setMyRating(ratingData.rating);
+        }
+      }
+    } catch (err: any) {
+      console.error('fetch rat error', err);
+      Alert.alert('Error', err.message || 'Could not load rat');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleEmojiReaction = async (emoji: string) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  const handleRate = async (rating: number) => {
+    if (!user?.id) {
+      Alert.alert('Sign in required', 'You must be signed in to rate rats.');
+      return;
+    }
+    if (!rat) return;
 
-    const existingReaction = reactions.find(
-      (r) => r.emoji === emoji && r.reactor_id === user?.id
-    );
-
-    if (existingReaction) {
-      await supabase
-        .from('emoji_reactions')
-        .delete()
-        .eq('id', existingReaction.id);
-    } else {
-      await supabase.from('emoji_reactions').insert({
-        rat_id: id as string,
-        reactor_id: user?.id,
-        emoji,
-      });
+    // don’t allow rating your own rat
+    if (rat.owner_id === user.id) {
+      Alert.alert('Nope', 'You cannot rate your own rat.');
+      return;
     }
 
-    fetchRatDetails();
-  };
-
-  const handleReport = () => {
-    Alert.alert(
-      'Report Rat',
-      'Why are you reporting this rat?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Inappropriate Content',
-          onPress: () => submitReport('Inappropriate content'),
-        },
-        {
-          text: 'Spam',
-          onPress: () => submitReport('Spam'),
-        },
-        {
-          text: 'Other',
-          onPress: () => submitReport('Other'),
-        },
-      ],
-      { cancelable: true }
-    );
-  };
-
-  const submitReport = async (reason: string) => {
+    setSubmitting(true);
     try {
-      await supabase.from('reports').insert({
-        rat_id: id as string,
-        reporter_id: user?.id,
-        reason,
-      });
-      Alert.alert('Thank you', 'Your report has been submitted.');
-    } catch (error) {
-      console.error('Error submitting report:', error);
+      const payload = {
+        rat_id: rat.id,
+        rater_id: user.id, // <— only rater_id, never user_id
+        rating,
+      };
+
+      // Helpful log if anything goes wrong
+      console.log('rating upsert payload', payload);
+
+      const { error } = await supabase
+        .from('rat_ratings')
+        .upsert(payload, {
+          onConflict: 'rat_id,rater_id',
+        });
+
+      if (error) throw error;
+
+      setMyRating(rating);
+    } catch (err: any) {
+      console.error('rating error', err);
+      Alert.alert('Error', err.message || 'Could not rate rat');
+    } finally {
+      setSubmitting(false);
     }
   };
 
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#FFFFFF" />
+        <ActivityIndicator color="#fff" />
       </View>
     );
   }
 
   if (!rat) {
     return (
-      <View style={styles.errorContainer}>
-        <Text style={styles.errorText}>Rat not found</Text>
+      <View style={styles.loadingContainer}>
+        <Text style={{ color: '#fff' }}>Rat not found</Text>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <Text style={styles.backButtonText}>Back to rats</Text>
+        </TouchableOpacity>
       </View>
     );
   }
 
-  const avgRating = rat.ratings_count > 0 ? rat.ratings_sum / rat.ratings_count : 0;
-  const reactionCounts = reactions.reduce(
-    (acc, r) => {
-      acc[r.emoji] = (acc[r.emoji] || 0) + 1;
-      return acc;
-    },
-    {} as Record<string, number>
-  );
-
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <View style={styles.header}>
-        <TouchableOpacity
-          style={styles.closeButton}
-          onPress={() => router.back()}
-        >
-          <X size={24} color="#FFFFFF" />
+      {/* header */}
+      <View style={styles.topBar}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <Text style={styles.backButtonText}>← Back to rats</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.reportButton} onPress={handleReport}>
-          <Flag size={20} color="#FFFFFF" />
-        </TouchableOpacity>
+        {rat.title ? <Text style={styles.title}>{rat.title}</Text> : null}
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent}>
+      {/* image */}
+      <View style={styles.imageWrapper}>
         <Image
           source={{ uri: rat.image_url }}
-          style={styles.ratImage}
+          style={styles.image}
           resizeMode="contain"
         />
+      </View>
 
-        {rat.title && <Text style={styles.ratTitle}>{rat.title}</Text>}
-
-        <View style={styles.ratingSection}>
-          <View style={styles.ratingRow}>
-            <Star size={20} color="#FFD700" fill="#FFD700" />
-            <Text style={styles.ratingText}>
-              {avgRating.toFixed(1)} ({rat.ratings_count} ratings)
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.emojiSection}>
-          <Text style={styles.sectionTitle}>React with Emoji</Text>
-          <View style={styles.emojiGrid}>
-            {EMOJI_OPTIONS.map((emoji) => {
-              const count = reactionCounts[emoji] || 0;
-              const hasReacted = reactions.some(
-                (r) => r.emoji === emoji && r.reactor_id === user?.id
-              );
-
-              return (
-                <TouchableOpacity
-                  key={emoji}
+      {/* rating bar */}
+      <View style={styles.ratingPanel}>
+        <Text style={styles.ratingLabel}>Rate this rat</Text>
+        <View style={styles.ratingRow}>
+          {[1, 2, 3].map((r) => {
+            const isActive = myRating === r;
+            return (
+              <TouchableOpacity
+                key={r}
+                style={[styles.ratingButton, isActive && styles.ratingButtonActive]}
+                onPress={() => handleRate(r)}
+                disabled={submitting}
+              >
+                <Text
                   style={[
-                    styles.emojiButton,
-                    hasReacted && styles.emojiButtonActive,
+                    styles.ratingButtonText,
+                    isActive && styles.ratingButtonTextActive,
                   ]}
-                  onPress={() => handleEmojiReaction(emoji)}
                 >
-                  <Text style={styles.emoji}>{emoji}</Text>
-                  {count > 0 && (
-                    <Text style={styles.emojiCount}>{count}</Text>
-                  )}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+                  {r} 🐀
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
-      </ScrollView>
+        {rat.owner_id === user?.id ? (
+          <Text style={styles.infoText}>You can’t rate your own rat.</Text>
+        ) : myRating ? (
+          <Text style={styles.infoText}>You rated this rat: {myRating} 🐀</Text>
+        ) : null}
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#000000',
-  },
+  container: { flex: 1, backgroundColor: '#000' },
   loadingContainer: {
     flex: 1,
+    backgroundColor: '#000',
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#000000',
+    gap: 12,
   },
-  errorContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#000000',
-  },
-  errorText: {
-    color: '#FFFFFF',
-    fontSize: 18,
-  },
-  header: {
+  topBar: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#333333',
+    paddingTop: 8,
+    paddingBottom: 8,
+    gap: 12,
   },
-  closeButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+  backButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
     backgroundColor: '#1A1A1A',
-    justifyContent: 'center',
+    borderRadius: 999,
+  },
+  backButtonText: {
+    color: '#fff',
+    fontWeight: '600',
+  },
+  title: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 16,
+    flexShrink: 1,
+  },
+  imageWrapper: {
+    flex: 1,
     alignItems: 'center',
-  },
-  reportButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#1A1A1A',
     justifyContent: 'center',
-    alignItems: 'center',
+    paddingHorizontal: 8,
   },
-  scrollContent: {
-    padding: 16,
-  },
-  ratImage: {
+  image: {
     width: '100%',
-    aspectRatio: 1,
-    borderRadius: 12,
-    backgroundColor: '#1A1A1A',
-    marginBottom: 16,
+    height: '100%',
   },
-  ratTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#FFFFFF',
-    marginBottom: 16,
-    textAlign: 'center',
+  ratingPanel: {
+    padding: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#222',
+    backgroundColor: '#000',
   },
-  ratingSection: {
-    alignItems: 'center',
-    marginBottom: 32,
+  ratingLabel: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 12,
   },
   ratingRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  ratingText: {
-    fontSize: 18,
-    color: '#FFFFFF',
-    fontWeight: '600',
-  },
-  emojiSection: {
-    marginBottom: 32,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#FFFFFF',
-    marginBottom: 16,
-  },
-  emojiGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: 12,
+    marginBottom: 8,
   },
-  emojiButton: {
-    width: 68,
-    height: 68,
-    borderRadius: 12,
+  ratingButton: {
+    flex: 1,
     backgroundColor: '#1A1A1A',
-    justifyContent: 'center',
+    borderRadius: 12,
+    paddingVertical: 12,
     alignItems: 'center',
-    borderWidth: 2,
-    borderColor: 'transparent',
   },
-  emojiButtonActive: {
-    borderColor: '#6B4E2E',
+  ratingButtonActive: {
+    backgroundColor: '#6B4E2E',
   },
-  emoji: {
-    fontSize: 32,
+  ratingButtonText: {
+    color: '#fff',
+    fontWeight: '600',
   },
-  emojiCount: {
+  ratingButtonTextActive: {
+    color: '#fff',
+  },
+  infoText: {
+    color: '#888',
     fontSize: 12,
-    color: '#999999',
     marginTop: 4,
   },
 });

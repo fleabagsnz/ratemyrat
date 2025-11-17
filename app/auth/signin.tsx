@@ -1,4 +1,6 @@
-import React, { useState } from 'react';
+console.log('GOOGLE_IOS_CLIENT_ID (runtime):', GOOGLE_IOS_CLIENT_ID);
+
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -10,18 +12,24 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import * as AppleAuthentication from 'expo-apple-authentication';
-import * as WebBrowser from 'expo-web-browser';
-import { makeRedirectUri } from 'expo-auth-session';
 import * as Crypto from 'expo-crypto';
+import * as Google from 'expo-auth-session/providers/google';
+import * as WebBrowser from 'expo-web-browser';
 import { supabase } from '@/lib/supabase';
 
-// we call maybeCompleteAuthSession in root layout, so we can omit here
-const redirectTo = makeRedirectUri({
-  scheme: 'ratemyrat',
-});
+WebBrowser.maybeCompleteAuthSession();
+
+const GOOGLE_IOS_CLIENT_ID =
+  process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID ?? '';
 
 export default function SignInScreen() {
   const [loading, setLoading] = useState(false);
+
+  // --- GOOGLE HOOK SETUP ---
+  const [googleRequest, googleResponse, promptGoogleSignIn] =
+    Google.useIdTokenAuthRequest({
+      iosClientId: GOOGLE_IOS_CLIENT_ID,
+    });
 
   const routeAfterAuth = async () => {
     try {
@@ -41,6 +49,37 @@ export default function SignInScreen() {
     }
   };
 
+  // Handle Google auth result
+  useEffect(() => {
+    const handleGoogleResponse = async () => {
+      if (!googleResponse) return;
+      if (googleResponse.type !== 'success') return;
+
+      const idToken = googleResponse.authentication?.idToken;
+      if (!idToken) {
+        Alert.alert('Sign in error', 'No ID token returned from Google.');
+        return;
+      }
+
+      try {
+        setLoading(true);
+        const { data, error } = await supabase.auth.signInWithIdToken({
+          provider: 'google',
+          token: idToken,
+        });
+
+        if (error) throw error;
+        if (data?.user) await routeAfterAuth();
+      } catch (err: any) {
+        Alert.alert('Sign in error', err?.message ?? String(err));
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    handleGoogleResponse();
+  }, [googleResponse]);
+
   const handleAppleSignIn = async () => {
     if (Platform.OS !== 'ios') {
       Alert.alert('Error', 'Apple Sign In is only available on iOS');
@@ -50,16 +89,12 @@ export default function SignInScreen() {
     try {
       setLoading(true);
 
-      // 1) make a raw nonce
       const rawNonce = Crypto.randomUUID();
-
-      // 2) hash it for Apple
       const hashedNonce = await Crypto.digestStringAsync(
         Crypto.CryptoDigestAlgorithm.SHA256,
         rawNonce
       );
 
-      // 3) send the HASHED nonce to Apple
       const credential = await AppleAuthentication.signInAsync({
         requestedScopes: [
           AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
@@ -72,7 +107,6 @@ export default function SignInScreen() {
         throw new Error('Apple did not return an identity token.');
       }
 
-      // 4) send the RAW nonce to Supabase so it can hash and compare
       const { data, error } = await supabase.auth.signInWithIdToken({
         provider: 'apple',
         token: credential.identityToken,
@@ -89,25 +123,18 @@ export default function SignInScreen() {
     }
   };
 
-  const handleGoogleSignIn = async () => {
+  const handleGooglePress = async () => {
+    if (!GOOGLE_IOS_CLIENT_ID) {
+      Alert.alert(
+        'Config error',
+        'EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID is not set in your env.'
+      );
+      return;
+    }
+
     try {
       setLoading(true);
-
-      const { data, error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          redirectTo,
-          skipBrowserRedirect: true,
-        },
-      });
-
-      if (error) throw error;
-      if (!data?.url) throw new Error('No auth URL returned from Supabase.');
-
-      await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
-      await routeAfterAuth();
-    } catch (error: any) {
-      Alert.alert('Sign in error', error?.message ?? String(error));
+      await promptGoogleSignIn();
     } finally {
       setLoading(false);
     }
@@ -134,9 +161,13 @@ export default function SignInScreen() {
           )}
 
           <TouchableOpacity
-            style={[styles.button, styles.googleButton, loading && { opacity: 0.7 }]}
-            onPress={handleGoogleSignIn}
-            disabled={loading}
+            style={[
+              styles.button,
+              styles.googleButton,
+              (loading || !googleRequest) && { opacity: 0.7 },
+            ]}
+            onPress={handleGooglePress}
+            disabled={loading || !googleRequest}
           >
             {loading ? (
               <ActivityIndicator />
@@ -156,13 +187,43 @@ export default function SignInScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000000' },
-  content: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32 },
-  title: { fontSize: 48, fontWeight: 'bold', color: '#FFFFFF', marginBottom: 8, textAlign: 'center' },
-  subtitle: { fontSize: 18, color: '#999999', textAlign: 'center', marginBottom: 48, lineHeight: 24 },
+  content: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
+  },
+  title: {
+    fontSize: 48,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  subtitle: {
+    fontSize: 18,
+    color: '#999999',
+    textAlign: 'center',
+    marginBottom: 48,
+    lineHeight: 24,
+  },
   buttonContainer: { width: '100%', maxWidth: 320, gap: 16 },
   appleButton: { width: '100%', height: 52 },
-  button: { width: '100%', height: 52, borderRadius: 12, justifyContent: 'center', alignItems: 'center' },
+  button: {
+    width: '100%',
+    height: 52,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   googleButton: { backgroundColor: '#FFFFFF' },
   googleButtonText: { color: '#000000', fontSize: 16, fontWeight: '600' },
-  terms: { marginTop: 32, fontSize: 12, color: '#666666', textAlign: 'center', maxWidth: 280, lineHeight: 16 },
+  terms: {
+    marginTop: 32,
+    fontSize: 12,
+    color: '#666666',
+    textAlign: 'center',
+    maxWidth: 280,
+    lineHeight: 16,
+  },
 });

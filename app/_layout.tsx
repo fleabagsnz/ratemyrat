@@ -1,9 +1,11 @@
+// app/_layout.tsx
 import { useEffect } from 'react';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { View, ActivityIndicator, StyleSheet } from 'react-native';
+
 import { useFrameworkReady } from '@/hooks/useFrameworkReady';
 import { AuthProvider, useAuth } from '@/contexts/AuthContext';
-import { View, ActivityIndicator, StyleSheet } from 'react-native';
 
 function RootLayoutNav() {
   const { session, profile, loading } = useAuth();
@@ -13,17 +15,31 @@ function RootLayoutNav() {
   useEffect(() => {
     if (loading) return;
 
-    const inAuthGroup = segments[0] === 'auth';
-    const inTabsGroup = segments[0] === '(tabs)';
+    const root = segments[0]; // e.g. 'auth' or '(tabs)'
+    const inAuthGroup = root === 'auth';
+    const inTabsGroup = root === '(tabs)';
 
+    // No session → must be in auth
     if (!session && !inAuthGroup) {
       router.replace('/auth/signin');
-    } else if (session && !profile && !inAuthGroup) {
-      router.replace('/auth/username');
-    } else if (session && profile && inAuthGroup) {
-      router.replace('/(tabs)');
+      return;
     }
-  }, [session, profile, loading, segments]);
+
+    // Has session but no profile yet → username flow
+    if (session && !profile && !inAuthGroup) {
+      router.replace('/auth/username');
+      return;
+    }
+
+    // Fully onboarded user but stuck in auth routes → go to tabs
+    if (session && profile && inAuthGroup) {
+      router.replace('/(tabs)');
+      return;
+    }
+
+    // If already on tabs or rat/[id], do nothing
+    // (expo-router will handle normal navigation)
+  }, [session, profile, loading, segments, router]);
 
   if (loading) {
     return (
@@ -35,18 +51,18 @@ function RootLayoutNav() {
 
   return (
     <Stack screenOptions={{ headerShown: false }}>
-      {/* Auth routes */}
+      {/* Auth stack */}
       <Stack.Screen name="auth/signin" />
       <Stack.Screen name="auth/username" />
       <Stack.Screen name="auth/tour" />
 
-      {/* Main app routes */}
+      {/* Main app (tabs) */}
       <Stack.Screen name="(tabs)" />
 
-      {/* Detail routes */}
+      {/* Rat detail */}
       <Stack.Screen name="rat/[id]" />
 
-      {/* Optional 404 handler */}
+      {/* Not found */}
       <Stack.Screen name="+not-found" />
     </Stack>
   );

@@ -1,90 +1,125 @@
-import React, { useState, useRef } from 'react';
-import { View, StyleSheet, Dimensions, PanResponder } from 'react-native';
+// ...existing code...
+import React, { useRef, useState, useEffect } from 'react';
+import { View, PanResponder, StyleSheet } from 'react-native';
 import Svg, { Path, Rect } from 'react-native-svg';
 
-const CANVAS_SIZE = Math.min(Dimensions.get('window').width - 32, 400);
+type Tool = 'brush' | 'eraser';
 
-type DrawingCanvasProps = {
+export type DrawingCanvasProps = {
   color: string;
   brushSize: number;
-  tool: 'brush' | 'eraser';
-  onPathsChange: (paths: string[]) => void;
+  tool: Tool;
+  onStroke?: () => void;
+  onDrawingStart?: () => void;
+  onDrawingEnd?: () => void;
 };
 
-export const DrawingCanvas: React.FC<DrawingCanvasProps> = ({
-  color,
-  brushSize,
-  tool,
-  onPathsChange,
-}) => {
-  const [paths, setPaths] = useState<string[]>([]);
-  const [currentPath, setCurrentPath] = useState<string>('');
-  const pathStartRef = useRef<{ x: number; y: number } | null>(null);
-
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (evt) => {
-        const { locationX, locationY } = evt.nativeEvent;
-        pathStartRef.current = { x: locationX, y: locationY };
-        setCurrentPath(`M ${locationX} ${locationY}`);
-      },
-      onPanResponderMove: (evt) => {
-        const { locationX, locationY } = evt.nativeEvent;
-        setCurrentPath((prev) => `${prev} L ${locationX} ${locationY}`);
-      },
-      onPanResponderRelease: () => {
-        if (currentPath) {
-          const newPaths = [...paths, currentPath];
-          setPaths(newPaths);
-          onPathsChange(newPaths);
-          setCurrentPath('');
-        }
-        pathStartRef.current = null;
-      },
-    })
-  ).current;
-
-  const strokeColor = tool === 'eraser' ? '#000000' : color;
-  const strokeWidth = tool === 'eraser' ? brushSize * 2 : brushSize;
-
-  return (
-    <View style={styles.container} {...panResponder.panHandlers}>
-      <Svg width={CANVAS_SIZE} height={CANVAS_SIZE}>
-        <Rect width={CANVAS_SIZE} height={CANVAS_SIZE} fill="#000000" />
-        {paths.map((path, index) => (
-          <Path
-            key={index}
-            d={path}
-            stroke={strokeColor}
-            strokeWidth={strokeWidth}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            fill="none"
-          />
-        ))}
-        {currentPath && (
-          <Path
-            d={currentPath}
-            stroke={strokeColor}
-            strokeWidth={strokeWidth}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            fill="none"
-          />
-        )}
-      </Svg>
-    </View>
-  );
+type Stroke = {
+  color: string;
+  width: number;
+  d: string;
 };
+
+export const DrawingCanvas = React.forwardRef<View, DrawingCanvasProps>(
+  ({ color, brushSize, tool, onStroke, onDrawingStart, onDrawingEnd }, ref) => {
+    const [strokes, setStrokes] = useState<Stroke[]>([]);
+    const currentPath = useRef<string>('');
+
+    // keep latest props in refs so PanResponder handlers always use current values
+    const colorRef = useRef(color);
+    const brushRef = useRef(brushSize);
+    const toolRef = useRef(tool);
+    const onStrokeRef = useRef(onStroke);
+    const onDrawingStartRef = useRef(onDrawingStart);
+    const onDrawingEndRef = useRef(onDrawingEnd);
+
+    useEffect(() => { colorRef.current = color; }, [color]);
+    useEffect(() => { brushRef.current = brushSize; }, [brushSize]);
+    useEffect(() => { toolRef.current = tool; }, [tool]);
+    useEffect(() => { onStrokeRef.current = onStroke; }, [onStroke]);
+    useEffect(() => { onDrawingStartRef.current = onDrawingStart; }, [onDrawingStart]);
+    useEffect(() => { onDrawingEndRef.current = onDrawingEnd; }, [onDrawingEnd]);
+
+    const panResponder = useRef(
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: (evt) => {
+          onDrawingStartRef.current?.();
+
+          const { locationX, locationY } = evt.nativeEvent;
+          const strokeColor = toolRef.current === 'eraser' ? '#000000' : colorRef.current;
+          currentPath.current = `M ${locationX} ${locationY}`;
+          setStrokes((prev) => [
+            ...prev,
+            {
+              color: strokeColor,
+              width: brushRef.current,
+              d: currentPath.current,
+            },
+          ]);
+          onStrokeRef.current?.();
+        },
+        onPanResponderMove: (evt) => {
+          const { locationX, locationY } = evt.nativeEvent;
+          // append to current path string
+          currentPath.current += ` L ${locationX} ${locationY}`;
+          setStrokes((prev) => {
+            if (prev.length === 0) return prev;
+            const next = [...prev];
+            next[next.length - 1] = {
+              ...next[next.length - 1],
+              d: currentPath.current,
+            };
+            return next;
+          });
+        },
+        onPanResponderRelease: () => {
+          // drop any degenerate single-point strokes to avoid empty/invalid path rendering
+          setStrokes((prev) => prev.filter((s) => typeof s.d === 'string' && s.d.includes(' L ')));
+          currentPath.current = '';
+          onDrawingEndRef.current?.();
+        },
+        onPanResponderTerminate: () => {
+          setStrokes((prev) => prev.filter((s) => typeof s.d === 'string' && s.d.includes(' L ')));
+          currentPath.current = '';
+          onDrawingEndRef.current?.();
+        },
+      })
+    ).current;
+
+    return (
+      <View ref={ref} style={styles.wrapper} {...panResponder.panHandlers}>
+        <Svg width="100%" height="100%">
+          <Rect x={0} y={0} width="100%" height="100%" fill="#000000" />
+          {strokes.map((s, idx) => {
+            // skip empty or degenerate paths to avoid CoreGraphics warnings
+            if (!s.d || s.d.trim().length === 0) return null;
+            return (
+              <Path
+                key={idx}
+                d={s.d}
+                stroke={s.color}
+                strokeWidth={s.width}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
+              />
+            );
+          })}
+        </Svg>
+      </View>
+    );
+  }
+);
 
 const styles = StyleSheet.create({
-  container: {
-    width: CANVAS_SIZE,
-    height: CANVAS_SIZE,
-    backgroundColor: '#000000',
+  wrapper: {
+    width: '100%',
+    aspectRatio: 1,
+    backgroundColor: '#000',
     borderRadius: 12,
     overflow: 'hidden',
   },
 });
+// ...existing code...

@@ -1,3 +1,4 @@
+// app/(tabs)/index.tsx
 import React, { useState, useEffect } from 'react';
 import {
   View,
@@ -11,16 +12,18 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import { supabase } from '@/lib/supabase';
-import { Star } from 'lucide-react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+
+type RatRatingRow = {
+  rating: number;
+};
 
 type Rat = {
   id: string;
   title: string | null;
   image_url: string;
-  avg_rating: number | null;
-  rating_count: number | null;
   created_at: string;
+  rat_ratings: RatRatingRow[];
 };
 
 const WINDOW_WIDTH = Dimensions.get('window').width;
@@ -39,38 +42,31 @@ export default function WallScreen() {
     try {
       let query = supabase
         .from('rats')
-        .select('id, title, image_url, avg_rating, rating_count, created_at')
-        .eq('moderation_state', 'approved');
-
-      // order: best rats first, then newest
-      query = query
-        .order('avg_rating', { ascending: false, nullsFirst: false })
-        .order('rating_count', { ascending: false, nullsFirst: false })
+        .select(
+          `
+          id,
+          title,
+          image_url,
+          created_at,
+          rat_ratings(rating)
+        `
+        )
+        .eq('moderation_state', 'approved')
         .order('created_at', { ascending: false })
         .limit(50);
 
       if (view === 'today') {
-        const now = new Date();
-        const startOfDay = new Date(
-          now.getFullYear(),
-          now.getMonth(),
-          now.getDate(),
-          0,
-          0,
-          0,
-          0
-        ).toISOString();
-
-        query = query.gte('created_at', startOfDay);
+        const today = new Date().toISOString().split('T')[0];
+        query = query.gte('created_at', `${today}T00:00:00`);
       }
 
       const { data, error } = await query;
 
       if (error) throw error;
-      setRats(data || []);
+
+      setRats((data as Rat[]) || []);
     } catch (error) {
       console.error('Error fetching rats:', error);
-      setRats([]);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -79,11 +75,18 @@ export default function WallScreen() {
 
   useEffect(() => {
     fetchRats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
 
   const renderRat = ({ item, index }: { item: Rat; index: number }) => {
-    const avgRating = item.avg_rating ?? 0;
-    const ratingCount = item.rating_count ?? 0;
+    const ratings = item.rat_ratings || [];
+    const ratingsCount = ratings.length;
+
+    const avgRating =
+      ratingsCount > 0
+        ? ratings.reduce((sum, row) => sum + (row.rating ?? 0), 0) /
+          ratingsCount
+        : 0;
 
     return (
       <TouchableOpacity
@@ -100,16 +103,16 @@ export default function WallScreen() {
         />
         <View style={styles.ratInfo}>
           <View style={styles.ratingRow}>
-            <Star size={14} color="#FFD700" fill="#FFD700" />
+            <Text style={styles.cheeseIcon}>🧀</Text>
             <Text style={styles.ratingText}>
-              {avgRating.toFixed(1)} ({ratingCount})
+              {avgRating.toFixed(2)} ({ratingsCount})
             </Text>
           </View>
-          {item.title ? (
+          {item.title && (
             <Text style={styles.ratTitle} numberOfLines={1}>
               {item.title}
             </Text>
-          ) : null}
+          )}
         </View>
       </TouchableOpacity>
     );
@@ -243,6 +246,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
+  },
+  cheeseIcon: {
+    fontSize: 14,
   },
   ratingText: {
     color: '#FFFFFF',
