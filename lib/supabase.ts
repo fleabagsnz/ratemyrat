@@ -1,18 +1,21 @@
 // lib/supabase.ts
 import 'react-native-url-polyfill/auto';
-import Constants from 'expo-constants';
 import { createClient, type SupabaseClientOptions } from '@supabase/supabase-js';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
-// read from app.config.js -> extra
-const supabaseUrl = Constants.expoConfig?.extra?.EXPO_PUBLIC_SUPABASE_URL as string | undefined;
-const supabaseAnonKey = Constants.expoConfig?.extra?.EXPO_PUBLIC_SUPABASE_ANON_KEY as string | undefined;
+// ✅ Read from EXPO_PUBLIC_* env vars at build time
+const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL as string | undefined;
+const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY as string | undefined;
+
+// 🔊 Loud logging so we always see what's going on
+console.log('[Supabase] URL from env:', supabaseUrl);
+console.log('[Supabase] anon key present?', !!supabaseAnonKey);
 
 if (!supabaseUrl || !supabaseAnonKey) {
-  console.warn(
+  console.error(
     '[Supabase] Missing EXPO_PUBLIC_SUPABASE_URL or EXPO_PUBLIC_SUPABASE_ANON_KEY. ' +
-      'Make sure .env is present and app.config.js exports them under expo.extra.'
+      'Check your .env at project root and EXPO_PUBLIC_ prefixes.'
   );
 }
 
@@ -60,9 +63,27 @@ const options: SupabaseClientOptions<'public'> = {
     storage: ExpoSecureStoreAdapter as any,
     autoRefreshToken: true,
     persistSession: true,
-    detectSessionInUrl: false, // native: we handle redirect manually
+    detectSessionInUrl: false,
     flowType: 'pkce',
   },
 };
 
 export const supabase = createClient(supabaseUrl ?? '', supabaseAnonKey ?? '', options);
+
+// 🔍 Tiny startup health check using plain fetch
+if (supabaseUrl && supabaseAnonKey) {
+  (async () => {
+    try {
+      console.log('[Supabase] Doing health check fetch…');
+      const res = await fetch(`${supabaseUrl}/auth/v1/health`, {
+        method: 'GET',
+        headers: {
+          apikey: supabaseAnonKey,
+        },
+      });
+      console.log('[Supabase] Health check status:', res.status);
+    } catch (err) {
+      console.log('[Supabase] Health check fetch error:', err);
+    }
+  })();
+}

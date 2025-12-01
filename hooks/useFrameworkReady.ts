@@ -1,13 +1,21 @@
 import { useEffect } from 'react';
 
-declare global {
-  interface Window {
-    frameworkReady?: () => void;
-  }
-}
-
 export function useFrameworkReady() {
   useEffect(() => {
-    window.frameworkReady?.();
-  });
+    try {
+      // Use globalThis instead of window, and guard hard
+      const g: any = globalThis;
+
+      if (
+        g &&
+        typeof g === 'object' &&
+        typeof g.frameworkReady === 'function'
+      ) {
+        g.frameworkReady();
+      }
+    } catch (e) {
+      // Swallow any weirdness; this hook is purely optional
+      console.log('[frameworkReady] Ignored error:', e);
+    }
+  }, []);
 }

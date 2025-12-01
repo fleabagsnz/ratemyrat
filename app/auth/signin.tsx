@@ -1,5 +1,3 @@
-console.log('GOOGLE_IOS_CLIENT_ID (runtime):', GOOGLE_IOS_CLIENT_ID);
-
 import React, { useEffect, useState } from 'react';
 import {
   View,
@@ -21,6 +19,11 @@ WebBrowser.maybeCompleteAuthSession();
 
 const GOOGLE_IOS_CLIENT_ID =
   process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID ?? '';
+
+console.log(
+  'GOOGLE_IOS_CLIENT_ID (runtime):',
+  GOOGLE_IOS_CLIENT_ID ? '[SET]' : '[MISSING]'
+);
 
 export default function SignInScreen() {
   const [loading, setLoading] = useState(false);
