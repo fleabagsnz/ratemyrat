@@ -1,64 +1,86 @@
+// hooks/useBadgeAwards.ts
 import { useState } from 'react';
 import { supabase } from '@/lib/supabase';
+import type { BadgeSlug } from '@/lib/badges';
 
-export type BadgeDef = {
-  key: string;
+// Shape of a badge the UI can show
+export type AwardedBadge = {
+  slug: BadgeSlug;
   name: string;
-  description: string;
-  image: any; // require('...png')
+  description?: string | null;
 };
 
-export const BADGE_DEFS: BadgeDef[] = [
-  {
-    key: 'baby_first_rat',
-    name: "Baby's First Rat!",
-    description: 'Submitted your very first rat.',
-    image: require('../assets/badges/baby-first-rat.png'),
-  },
-  // ...other badges
-];
-
 export function useBadgeAwards() {
-  const [unlockedBadge, setUnlockedBadge] = useState<BadgeDef | null>(null);
+  const [latestBadge, setLatestBadge] = useState<AwardedBadge | null>(null);
 
-  const awardBadgeIfNeeded = async (userId: string, key: string) => {
-    const def = BADGE_DEFS.find((b) => b.key === key);
-    if (!def) return;
+  /**
+   * Award a badge by slug (e.g. 'baby-first-rat') to a user
+   * if they don't already have it.
+   */
+  const awardBadge = async (userId: string, slug: BadgeSlug) => {
+    if (!userId || !slug) return;
 
-    // Already earned?
+    // 1) Find the badge row by slug
+    const { data: badge, error: badgeError } = await supabase
+      .from('badges')
+      .select('id, name, description, slug')
+      .eq('slug', slug)
+      .maybeSingle();
+
+    if (badgeError) {
+      console.error('awardBadge: error fetching badge by slug', badgeError);
+      return;
+    }
+
+    if (!badge) {
+      console.warn(`awardBadge: no badge found for slug "${slug}"`);
+      return;
+    }
+
+    // 2) Check if already earned
     const { data: existing, error: existingError } = await supabase
       .from('user_badges')
       .select('id')
       .eq('user_id', userId)
-      .eq('badge_key', key)
+      .eq('badge_id', badge.id)
       .maybeSingle();
 
     if (existingError) {
-      console.error('check badge error', existingError);
+      console.error('awardBadge: error checking user_badges', existingError);
       return;
     }
 
     if (existing) {
-      return; // already have it, no popup
+      // already have it, no popup
+      return;
     }
 
-    // Insert new badge
+    // 3) Insert new record
     const { error: insertError } = await supabase
       .from('user_badges')
       .insert({
         user_id: userId,
-        badge_key: key,
+        badge_id: badge.id,
       });
 
     if (insertError) {
-      console.error('insert badge error', insertError);
+      console.error('awardBadge: error inserting user_badges', insertError);
       return;
     }
 
-    setUnlockedBadge(def);
+    // 4) Show modal
+    setLatestBadge({
+      slug: badge.slug as BadgeSlug,
+      name: badge.name,
+      description: badge.description,
+    });
   };
 
-  const clearUnlockedBadge = () => setUnlockedBadge(null);
+  const clearLatestBadge = () => setLatestBadge(null);
 
-  return { unlockedBadge, awardBadgeIfNeeded, clearUnlockedBadge };
+  return {
+    latestBadge,
+    awardBadge,
+    clearLatestBadge,
+  };
 }

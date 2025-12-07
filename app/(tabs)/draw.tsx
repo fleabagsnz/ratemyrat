@@ -19,6 +19,7 @@ import { Trash2 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { useBadgeAwards } from '@/hooks/useBadgeAwards';
 import { BadgeUnlockedModal } from '@/components/BadgeUnlockedModal';
+import type { BadgeSlug } from '@/lib/badges';
 
 const COLORS = {
   black: '#000000',
@@ -64,11 +65,15 @@ export default function DrawScreen() {
 
   const checkIfDrawnToday = async () => {
     try {
+      if (!user?.id) {
+        setHasDrawnToday(false);
+        return;
+      }
       const today = new Date().toISOString().split('T')[0];
       const { data } = await supabase
         .from('rats')
         .select('id')
-        .eq('owner_id', user?.id)
+        .eq('owner_id', user.id)
         .gte('created_at', `${today}T00:00:00`)
         .maybeSingle();
       setHasDrawnToday(!!data);
@@ -140,11 +145,8 @@ export default function DrawScreen() {
 
       if (insertError) throw insertError;
 
-      // 5. Award "Baby’s First Rat" badge
-      // NOTE: slug must match badges.slug in DB, e.g. "baby-first-rat"
-      if (awardBadge) {
-        await awardBadge('baby-first-rat');
-      }
+      // 5. Award "Baby's First Rat" badge (slug must exist in `badges.slug`)
+      await awardBadge(user.id, 'baby-first-rat' as BadgeSlug);
 
       Alert.alert('Success', 'Your rat has been submitted!', [
         {
@@ -285,8 +287,10 @@ export default function DrawScreen() {
       {/* Badge popup */}
       <BadgeUnlockedModal
         visible={!!latestBadge}
-        badge={latestBadge}
         onClose={clearLatestBadge}
+        name={latestBadge?.name ?? ''}
+        description={latestBadge?.description ?? undefined}
+        slug={(latestBadge?.slug ?? 'baby-first-rat') as BadgeSlug}
       />
     </SafeAreaView>
   );

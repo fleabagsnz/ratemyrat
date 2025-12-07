@@ -1,3 +1,4 @@
+// contexts/AuthContext.tsx
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
@@ -19,6 +20,7 @@ type Profile = {
   streak_current: number;
   streak_best: number;
   stats: ProfileStats | null;
+  is_evil: boolean; // <<< NEW
 };
 
 type AuthContextType = {
@@ -65,12 +67,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       entitlements: raw.entitlements ?? {},
       streak_current: raw.streak_current ?? 0,
       streak_best: raw.streak_best ?? 0,
-      stats: raw.stats ?? {
-        rats_submitted: 0,
-        ratings_given: 0,
-        ratings_received: 0,
-        avg_rating_received: 0,
-      },
+      stats:
+        raw.stats ?? {
+          rats_submitted: 0,
+          ratings_given: 0,
+          ratings_received: 0,
+          avg_rating_received: 0,
+        },
+      is_evil: raw.is_evil ?? false, // <<< NEW: read from DB, default false
     };
   };
 

@@ -9,24 +9,27 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, router } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
-import { router } from 'expo-router';
 import { Award, Flame, ShoppingBag, Shield, LogOut } from 'lucide-react-native';
 
 export default function SettingsScreen() {
   const { profile, signOut, refreshProfile } = useAuth();
+
   const [pushEnabled, setPushEnabled] = useState(profile?.push_opt_in ?? true);
+  const [evilEnabled, setEvilEnabled] = useState(profile?.is_evil ?? false);
 
   // Live stats
   const [ratsSubmitted, setRatsSubmitted] = useState<number | null>(null);
   const [ratingsGiven, setRatingsGiven] = useState<number | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
 
+  // Keep local switches in sync with profile whenever it changes
   useEffect(() => {
     setPushEnabled(profile?.push_opt_in ?? true);
-  }, [profile?.push_opt_in]);
+    setEvilEnabled(profile?.is_evil ?? false);
+  }, [profile?.push_opt_in, profile?.is_evil]);
 
   const loadStats = useCallback(async () => {
     if (!profile?.id) return;
@@ -34,34 +37,28 @@ export default function SettingsScreen() {
     try {
       setStatsLoading(true);
 
-      // Rats submitted by this user
-      const {
-        count: ratsCount,
-        error: ratsError,
-      } = await supabase
+      // rats submitted
+      const { count: ratsCount, error: ratsError } = await supabase
         .from('rats')
         .select('id', { head: true, count: 'exact' })
         .eq('owner_id', profile.id);
 
-      if (ratsError) {
-        console.error('Error counting rats_submitted', ratsError);
-      } else if (typeof ratsCount === 'number') {
+      if (!ratsError && typeof ratsCount === 'number') {
         setRatsSubmitted(ratsCount);
+      } else if (ratsError) {
+        console.error('Error counting rats_submitted', ratsError);
       }
 
-      // Ratings given by this user
-      const {
-        count: ratingsCount,
-        error: ratingsError,
-      } = await supabase
+      // ratings given
+      const { count: ratingsCount, error: ratingsError } = await supabase
         .from('rat_ratings')
         .select('id', { head: true, count: 'exact' })
         .eq('rater_id', profile.id);
 
-      if (ratingsError) {
-        console.error('Error counting ratings_given', ratingsError);
-      } else if (typeof ratingsCount === 'number') {
+      if (!ratingsError && typeof ratingsCount === 'number') {
         setRatingsGiven(ratingsCount);
+      } else if (ratingsError) {
+        console.error('Error counting ratings_given', ratingsError);
       }
     } catch (error) {
       console.error('Error loading stats:', error);
@@ -70,14 +67,12 @@ export default function SettingsScreen() {
     }
   }, [profile?.id]);
 
-  // Run when profile first exists
   useEffect(() => {
     if (profile?.id) {
       loadStats();
     }
   }, [profile?.id, loadStats]);
 
-  // Run again whenever Settings tab is focused
   useFocusEffect(
     useCallback(() => {
       if (profile?.id) {
@@ -87,15 +82,46 @@ export default function SettingsScreen() {
   );
 
   const handlePushToggle = async (value: boolean) => {
+    if (!profile?.id) return;
+    const prev = pushEnabled;
     setPushEnabled(value);
+
     try {
-      await supabase
+      const { error } = await supabase
         .from('profiles')
         .update({ push_opt_in: value })
-        .eq('id', profile?.id);
+        .eq('id', profile.id);
+
+      if (error) throw error;
       await refreshProfile();
     } catch (error) {
       console.error('Error updating push settings:', error);
+      // rollback UI if update fails
+      setPushEnabled(prev);
+      Alert.alert('Error', 'Could not update notification settings.');
+    }
+  };
+
+  const handleEvilToggle = async (value: boolean) => {
+    if (!profile?.id) return;
+    const prev = evilEnabled;
+    setEvilEnabled(value);
+
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ is_evil: value })
+        .eq('id', profile.id);
+
+      if (error) throw error;
+
+      // refresh so the tabs layout sees updated profile.is_evil
+      await refreshProfile();
+    } catch (error) {
+      console.error('Error updating evil tab setting:', error);
+      // rollback UI if update fails
+      setEvilEnabled(prev);
+      Alert.alert('Error', 'Could not update Evil tab setting.');
     }
   };
 
@@ -115,20 +141,17 @@ export default function SettingsScreen() {
   const bestStreak = profile?.streak_best ?? 0;
 
   const ratsSubmittedDisplay =
-    ratsSubmitted ??
-    profile?.stats?.rats_submitted ??
-    0;
+    ratsSubmitted ?? profile?.stats?.rats_submitted ?? 0;
 
   const ratingsGivenDisplay =
-    ratingsGiven ??
-    profile?.stats?.ratings_given ??
-    0;
+    ratingsGiven ?? profile?.stats?.ratings_given ?? 0;
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <Text style={styles.title}>Settings</Text>
 
+        {/* PROFILE */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Profile</Text>
           <View style={styles.card}>
@@ -136,6 +159,7 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        {/* STATS */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Stats</Text>
           <View style={styles.card}>
@@ -153,19 +177,24 @@ export default function SettingsScreen() {
               <Award size={20} color="#FFFFFF" />
               <Text style={styles.statLabel}>Rats Submitted</Text>
               <Text style={styles.statValue}>
-                {statsLoading && ratsSubmitted === null ? '…' : ratsSubmittedDisplay}
+                {statsLoading && ratsSubmitted === null
+                  ? '…'
+                  : ratsSubmittedDisplay}
               </Text>
             </View>
             <View style={styles.statRow}>
               <Award size={20} color="#FFFFFF" />
               <Text style={styles.statLabel}>Rats Rated</Text>
               <Text style={styles.statValue}>
-                {statsLoading && ratingsGiven === null ? '…' : ratingsGivenDisplay}
+                {statsLoading && ratingsGiven === null
+                  ? '…'
+                  : ratingsGivenDisplay}
               </Text>
             </View>
           </View>
         </View>
 
+        {/* BADGES */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Badges</Text>
           <TouchableOpacity
@@ -180,6 +209,7 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* IAP */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>In-App Purchase</Text>
           <TouchableOpacity
@@ -196,6 +226,7 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* NOTIFICATIONS */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Notifications</Text>
           <View style={styles.card}>
@@ -204,6 +235,7 @@ export default function SettingsScreen() {
               <Switch
                 value={pushEnabled}
                 onValueChange={handlePushToggle}
+                disabled={!profile}
                 trackColor={{ false: '#333333', true: '#6B4E2E' }}
                 thumbColor="#FFFFFF"
               />
@@ -211,6 +243,24 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        {/* EVIL TAB TOGGLE – buried a little */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Advanced</Text>
+          <View style={styles.card}>
+            <View style={styles.settingRow}>
+              <Text style={styles.settingLabel}>Enable Evil Tab</Text>
+              <Switch
+                value={evilEnabled}
+                onValueChange={handleEvilToggle}
+                disabled={!profile}
+                trackColor={{ false: '#333333', true: '#6B4E2E' }}
+                thumbColor="#FFFFFF"
+              />
+            </View>
+          </View>
+        </View>
+
+        {/* ADMIN */}
         {profile?.is_admin && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Admin</Text>
@@ -227,6 +277,7 @@ export default function SettingsScreen() {
           </View>
         )}
 
+        {/* SIGN OUT */}
         <TouchableOpacity style={styles.signOutButton} onPress={handleSignOut}>
           <LogOut size={20} color="#FF3B30" />
           <Text style={styles.signOutText}>Sign Out</Text>

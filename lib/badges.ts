@@ -1,6 +1,10 @@
 // lib/badges.ts
+
 export type BadgeSlug =
-  | 'babys-first-rat'
+  | 'baby-first-rat'
+  | 'three-day-streak'
+  | 'five-rats-rated'
+  | 'ten-rats-rated'
   | 'rat-arse'
   | 'you-rated-my-rat'
   | 'rat-fever'
@@ -12,10 +16,13 @@ export type BadgeSlug =
   | 'rat-royalty'
   | 'sewer-star'
   | 'cheddar-chaser'
-  | 'ratception';
+  | 'ratception'
 
 export const BADGE_ASSETS: Record<BadgeSlug, any> = {
-  'babys-first-rat': require('../assets/badges/baby-first-rat.png'),
+  'baby-first-rat': require('../assets/badges/baby-first-rat.png'),
+  'three-day-streak': require('../assets/badges/three-day-streak.png'),
+  'five-rats-rated': require('../assets/badges/five-rats-rated.png'),
+  'ten-rats-rated': require('../assets/badges/ten-rats-rated.png'),
   'rat-arse': require('../assets/badges/rat-arse.png'),
   'you-rated-my-rat': require('../assets/badges/you-rated-my-rat.png'),
   'rat-fever': require('../assets/badges/rat-fever.png'),
@@ -28,4 +35,4 @@ export const BADGE_ASSETS: Record<BadgeSlug, any> = {
   'sewer-star': require('../assets/badges/sewer-star.png'),
   'cheddar-chaser': require('../assets/badges/cheddar-chaser.png'),
   'ratception': require('../assets/badges/ratception.png'),
-};
+}

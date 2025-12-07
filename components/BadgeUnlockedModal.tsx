@@ -9,14 +9,14 @@ import {
   Image,
   TouchableOpacity,
 } from 'react-native';
-import { BADGE_ASSETS, BadgeSlug } from '@/lib/badges';
+import { BADGE_ASSETS } from '@/lib/badges';
 
 type Props = {
   visible: boolean;
   onClose: () => void;
   name: string;
   description?: string;
-  slug: BadgeSlug;
+  slug: string; // <— we treat slug as string
 };
 
 export function BadgeUnlockedModal({
@@ -33,6 +33,7 @@ export function BadgeUnlockedModal({
     if (visible) {
       scaleAnim.setValue(0);
       opacity.setValue(0);
+
       Animated.parallel([
         Animated.spring(scaleAnim, {
           toValue: 1,

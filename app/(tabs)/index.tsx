@@ -24,6 +24,11 @@ type Rat = {
   image_url: string;
   created_at: string;
   rat_ratings: RatRatingRow[];
+
+  // NEW: so we can filter locally as a safety net
+  moderation_state?: string | null;
+  is_flagged?: boolean | null;
+  flagged?: boolean | null;
 };
 
 const WINDOW_WIDTH = Dimensions.get('window').width;
@@ -48,10 +53,16 @@ export default function WallScreen() {
           title,
           image_url,
           created_at,
+          moderation_state,
+          is_flagged,
+          flagged,
           rat_ratings(rating)
         `
         )
+        // primary filter: only approved + not flagged
         .eq('moderation_state', 'approved')
+        .is('is_flagged', false)
+        .is('flagged', false)
         .order('created_at', { ascending: false })
         .limit(50);
 
@@ -64,7 +75,15 @@ export default function WallScreen() {
 
       if (error) throw error;
 
-      setRats((data as Rat[]) || []);
+      // Extra safety: filter on the client too, in case older rows
+      // don’t have the booleans populated exactly how we expect.
+      const cleaned = ((data as Rat[]) || []).filter((r) => {
+        const stateOk = (r.moderation_state ?? 'approved') === 'approved';
+        const notFlagged = !r.is_flagged && !r.flagged;
+        return stateOk && notFlagged;
+      });
+
+      setRats(cleaned);
     } catch (error) {
       console.error('Error fetching rats:', error);
     } finally {

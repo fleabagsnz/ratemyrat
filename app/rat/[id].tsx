@@ -19,6 +19,7 @@ type Rat = {
   image_url: string;
   title: string | null;
   owner_id: string;
+  moderation_state?: string;
 };
 
 export default function RatDetailScreen() {
@@ -29,6 +30,7 @@ export default function RatDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [myRating, setMyRating] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [reporting, setReporting] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -37,10 +39,9 @@ export default function RatDetailScreen() {
 
   const fetchRat = async (ratId: string) => {
     try {
-      // 1) load the rat itself
       const { data, error } = await supabase
         .from('rats')
-        .select('id, image_url, title, owner_id')
+        .select('id, image_url, title, owner_id, moderation_state')
         .eq('id', ratId)
         .maybeSingle();
 
@@ -51,21 +52,20 @@ export default function RatDetailScreen() {
         return;
       }
 
+      // still allow viewing even if flagged, good for admins
       setRat(data);
 
-      // 2) load *my* rating if logged in
       if (user?.id) {
-        const { data: ratingData, error: ratingError } = await supabase
+        const { data: ratingData } = await supabase
           .from('rat_ratings')
           .select('rating')
           .eq('rat_id', ratId)
-          .eq('rater_id', user.id) // IMPORTANT: rater_id
+          .eq('rater_id', user.id)
           .maybeSingle();
 
-        if (!ratingError && ratingData) {
-          setMyRating(ratingData.rating);
-        }
+        if (ratingData) setMyRating(ratingData.rating);
       }
+
     } catch (err: any) {
       console.error('fetch rat error', err);
       Alert.alert('Error', err.message || 'Could not load rat');
@@ -80,8 +80,6 @@ export default function RatDetailScreen() {
       return;
     }
     if (!rat) return;
-
-    // don’t allow rating your own rat
     if (rat.owner_id === user.id) {
       Alert.alert('Nope', 'You cannot rate your own rat.');
       return;
@@ -89,24 +87,18 @@ export default function RatDetailScreen() {
 
     setSubmitting(true);
     try {
-      const payload = {
-        rat_id: rat.id,
-        rater_id: user.id, // <— only rater_id, never user_id
-        rating,
-      };
-
-      // Helpful log if anything goes wrong
-      console.log('rating upsert payload', payload);
-
-      const { error } = await supabase
-        .from('rat_ratings')
-        .upsert(payload, {
-          onConflict: 'rat_id,rater_id',
-        });
-
+      const { error } = await supabase.from('rat_ratings').upsert(
+        {
+          rat_id: rat.id,
+          rater_id: user.id,
+          rating,
+        },
+        { onConflict: 'rat_id,rater_id' }
+      );
       if (error) throw error;
 
       setMyRating(rating);
+
     } catch (err: any) {
       console.error('rating error', err);
       Alert.alert('Error', err.message || 'Could not rate rat');
@@ -115,6 +107,72 @@ export default function RatDetailScreen() {
     }
   };
 
+  const handleReport = async () => {
+    if (!user?.id || !rat) {
+      Alert.alert('Error', 'You must be signed in to report.');
+      return;
+    }
+
+    Alert.alert(
+      'Report rat',
+      'Flag this rat as inappropriate or not a rat?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Report',
+          style: 'destructive',
+          onPress: async () => {
+            setReporting(true);
+            try {
+              // dedupe report
+              const { data: existing } = await supabase
+                .from('rat_reports')
+                .select('id')
+                .eq('rat_id', rat.id)
+                .eq('reporter_id', user.id)
+                .maybeSingle();
+
+              if (!existing) {
+                const { error: insertError } = await supabase
+                  .from('rat_reports')
+                  .insert({
+                    rat_id: rat.id,
+                    reporter_id: user.id,
+                    reason: 'user_flag',
+                  });
+                if (insertError) throw insertError;
+              }
+
+              // mark as flagged
+              const { error: updateError } = await supabase
+                .from('rats')
+                .update({
+                  moderation_state: 'flagged',
+                  is_flagged: true,
+                })
+                .eq('id', rat.id);
+
+              if (updateError) throw updateError;
+
+              Alert.alert(
+                'Thanks',
+                'This rat has been flagged and removed from public queues.'
+              );
+              router.back();
+
+            } catch (err: any) {
+              console.error('report error', err);
+              Alert.alert('Error', err.message || 'Could not report rat.');
+            } finally {
+              setReporting(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  // UI STATES
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
@@ -127,8 +185,11 @@ export default function RatDetailScreen() {
     return (
       <View style={styles.loadingContainer}>
         <Text style={{ color: '#fff' }}>Rat not found</Text>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <Text style={styles.backButtonText}>Back to rats</Text>
+        <TouchableOpacity
+          onPress={() => router.back()}
+          style={styles.backButton}
+        >
+          <Text style={styles.backButtonText}>Back</Text>
         </TouchableOpacity>
       </View>
     );
@@ -136,15 +197,16 @@ export default function RatDetailScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      {/* header */}
       <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <Text style={styles.backButtonText}>← Back to rats</Text>
+        <TouchableOpacity
+          onPress={() => router.back()}
+          style={styles.backButton}
+        >
+          <Text style={styles.backButtonText}>← Back</Text>
         </TouchableOpacity>
         {rat.title ? <Text style={styles.title}>{rat.title}</Text> : null}
       </View>
 
-      {/* image */}
       <View style={styles.imageWrapper}>
         <Image
           source={{ uri: rat.image_url }}
@@ -153,9 +215,9 @@ export default function RatDetailScreen() {
         />
       </View>
 
-      {/* rating bar */}
       <View style={styles.ratingPanel}>
         <Text style={styles.ratingLabel}>Rate this rat</Text>
+
         <View style={styles.ratingRow}>
           {[1, 2, 3].map((r) => {
             const isActive = myRating === r;
@@ -166,23 +228,29 @@ export default function RatDetailScreen() {
                 onPress={() => handleRate(r)}
                 disabled={submitting}
               >
-                <Text
-                  style={[
-                    styles.ratingButtonText,
-                    isActive && styles.ratingButtonTextActive,
-                  ]}
-                >
-                  {r} 🐀
-                </Text>
+                <Text style={styles.ratingButtonText}>{r} 🧀</Text>
               </TouchableOpacity>
             );
           })}
         </View>
-        {rat.owner_id === user?.id ? (
+
+        {rat.owner_id === user?.id && (
           <Text style={styles.infoText}>You can’t rate your own rat.</Text>
-        ) : myRating ? (
-          <Text style={styles.infoText}>You rated this rat: {myRating} 🐀</Text>
-        ) : null}
+        )}
+
+        {myRating && rat.owner_id !== user?.id && (
+          <Text style={styles.infoText}>You rated this {myRating} 🧀</Text>
+        )}
+
+        <TouchableOpacity
+          style={styles.reportButton}
+          onPress={handleReport}
+          disabled={reporting}
+        >
+          <Text style={styles.reportButtonText}>
+            {reporting ? 'Reporting…' : 'Report this rat'}
+          </Text>
+        </TouchableOpacity>
       </View>
     </SafeAreaView>
   );
@@ -211,10 +279,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#1A1A1A',
     borderRadius: 999,
   },
-  backButtonText: {
-    color: '#fff',
-    fontWeight: '600',
-  },
+  backButtonText: { color: '#fff', fontWeight: '600' },
   title: {
     color: '#fff',
     fontWeight: '700',
@@ -227,27 +292,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 8,
   },
-  image: {
-    width: '100%',
-    height: '100%',
-  },
+  image: { width: '100%', height: '100%' },
   ratingPanel: {
     padding: 16,
     borderTopWidth: 1,
     borderTopColor: '#222',
     backgroundColor: '#000',
   },
-  ratingLabel: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 12,
-  },
-  ratingRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginBottom: 8,
-  },
+  ratingLabel: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  ratingRow: { flexDirection: 'row', gap: 12, marginVertical: 12 },
   ratingButton: {
     flex: 1,
     backgroundColor: '#1A1A1A',
@@ -255,19 +308,20 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     alignItems: 'center',
   },
-  ratingButtonActive: {
-    backgroundColor: '#6B4E2E',
+  ratingButtonActive: { backgroundColor: '#6B4E2E' },
+  ratingButtonText: { color: '#fff', fontWeight: '600' },
+  infoText: { color: '#888', fontSize: 12, marginTop: 4 },
+  reportButton: {
+    marginTop: 12,
+    paddingVertical: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#ff5555',
+    alignItems: 'center',
   },
-  ratingButtonText: {
-    color: '#fff',
+  reportButtonText: {
+    color: '#ff5555',
     fontWeight: '600',
-  },
-  ratingButtonTextActive: {
-    color: '#fff',
-  },
-  infoText: {
-    color: '#888',
-    fontSize: 12,
-    marginTop: 4,
+    fontSize: 14,
   },
 });
