@@ -1,0 +1,99 @@
+-- Run these statements in Supabase (SQL editor or psql) to let flagged rats show in the Evil tab
+-- and to allow users to flag rats. They match the app code currently in the repo.
+
+-- 1) Ensure moderator toggle exists
+ALTER TABLE profiles
+ADD COLUMN IF NOT EXISTS is_evil boolean DEFAULT false;
+
+-- 2) Ensure flag columns exist and moderation_state allows flagged
+ALTER TABLE rats
+ADD COLUMN IF NOT EXISTS is_flagged boolean DEFAULT false,
+ADD COLUMN IF NOT EXISTS flagged boolean DEFAULT false,
+ADD COLUMN IF NOT EXISTS flagged_by uuid REFERENCES profiles(id),
+ADD COLUMN IF NOT EXISTS flagged_reason text;
+
+ALTER TABLE rats DROP CONSTRAINT IF EXISTS rats_moderation_state_check;
+ALTER TABLE rats
+ADD CONSTRAINT rats_moderation_state_check
+CHECK (moderation_state IN ('approved', 'pending_review', 'rejected', 'flagged'));
+
+-- 3) Normalize existing data
+UPDATE rats
+SET is_flagged = true
+WHERE moderation_state = 'flagged'
+  AND COALESCE(is_flagged, false) = false;
+
+UPDATE rats
+SET flagged = true
+WHERE moderation_state = 'flagged'
+  AND COALESCE(flagged, false) = false;
+
+UPDATE rats
+SET moderation_state = 'flagged'
+WHERE (COALESCE(is_flagged, false) = true OR COALESCE(flagged, false) = true)
+  AND moderation_state <> 'flagged';
+
+UPDATE rats
+SET moderation_state = 'approved'
+WHERE moderation_state IS NULL;
+
+-- 4) RLS: allow evil/admin users to read flagged rats; let anyone flag
+DROP POLICY IF EXISTS "Users can view approved rats" ON rats;
+
+CREATE POLICY "Users can view approved rats or own"
+  ON rats FOR SELECT
+  TO authenticated
+  USING (
+    moderation_state = 'approved'
+    OR owner_id = auth.uid()
+  );
+
+CREATE POLICY "Evil users can view flagged rats"
+  ON rats FOR SELECT
+  TO authenticated
+  USING (
+    (moderation_state = 'flagged' OR COALESCE(is_flagged, false) OR COALESCE(flagged, false))
+    AND EXISTS (
+      SELECT 1 FROM profiles p
+      WHERE p.id = auth.uid()
+        AND (p.is_admin = true OR p.is_evil = true)
+    )
+  );
+
+DROP POLICY IF EXISTS "Users can flag rats" ON rats;
+
+CREATE POLICY "Users can flag rats"
+  ON rats FOR UPDATE
+  TO authenticated
+  USING (true)
+  WITH CHECK (
+    moderation_state = 'flagged'
+    AND (COALESCE(is_flagged, false) = true OR COALESCE(flagged, false) = true)
+  );
+
+-- 5) rat_reports RLS: allow inserts/selects; moderators can delete/clear
+ALTER TABLE rat_reports ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can view rat reports" ON rat_reports;
+DROP POLICY IF EXISTS "Users can insert rat reports" ON rat_reports;
+DROP POLICY IF EXISTS "Moderators can manage rat reports" ON rat_reports;
+
+CREATE POLICY "Users can view rat reports"
+  ON rat_reports FOR SELECT
+  TO authenticated
+  USING (true);
+
+CREATE POLICY "Users can insert rat reports"
+  ON rat_reports FOR INSERT
+  TO authenticated
+  WITH CHECK (auth.uid() = reporter_id);
+
+CREATE POLICY "Moderators can manage rat reports"
+  ON rat_reports FOR DELETE
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM profiles p
+      WHERE p.id = auth.uid() AND (p.is_admin = true OR p.is_evil = true)
+    )
+  );

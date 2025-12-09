@@ -12,16 +12,22 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
+import { useBadgeAwards } from '@/hooks/useBadgeAwards';
+import { BadgeUnlockedModal } from '@/components/BadgeUnlockedModal';
 
 type Rat = {
   id: string;
   image_url: string;
   title: string | null;
   owner_id: string;
+  moderation_state?: string | null;
+  is_flagged?: boolean | null;
+  flagged?: boolean | null;
 };
 
 export default function RateScreen() {
   const { user } = useAuth();
+  const { latestBadge, clearLatestBadge, checkRatingBadges } = useBadgeAwards();
 
   const [currentRat, setCurrentRat] = useState<Rat | null>(null);
   const [loading, setLoading] = useState(true);
@@ -57,14 +63,22 @@ export default function RateScreen() {
       // Fetch only approved, not flagged, not owned by user
       const { data: ratsData, error: ratsError } = await supabase
         .from('rats')
-        .select('id, image_url, title, owner_id')
+        .select('id, image_url, title, owner_id, moderation_state, is_flagged, flagged')
         .eq('moderation_state', 'approved')
-        .eq('is_flagged', false)
+        .not('is_flagged', 'is', true)
+        .not('flagged', 'is', true)
+        .not('moderation_state', 'eq', 'flagged')
+        .not('moderation_state', 'eq', 'evil')
         .neq('owner_id', user.id);
 
       if (ratsError) throw ratsError;
 
-      const candidates = (ratsData || []).filter((r: any) => !ratedIds.has(r.id));
+      const candidates = (ratsData || []).filter((r: Rat) => {
+        if (ratedIds.has(r.id)) return false;
+        const stateOk = (r.moderation_state ?? 'approved') === 'approved';
+        const notFlagged = !r.is_flagged && !r.flagged && r.moderation_state !== 'flagged';
+        return stateOk && notFlagged;
+      });
 
       if (candidates.length === 0) {
         setCurrentRat(null);
@@ -103,6 +117,7 @@ export default function RateScreen() {
 
       if (error) throw error;
 
+      await checkRatingBadges();
       await loadNextRat();
     } catch (err: any) {
       console.error('rating error (rate tab)', err);
@@ -130,16 +145,25 @@ export default function RateScreen() {
           onPress: async () => {
             setReporting(true);
             try {
-              // Upsert report
-              const { error: reportError } = await supabase.from('rat_reports').upsert(
-                {
-                  rat_id: currentRat.id,
-                  reporter_id: user.id,
-                  reason: 'user_flag',
-                },
-                { onConflict: 'rat_id,reporter_id' }
-              );
-              if (reportError) throw reportError;
+              // Insert report only if not already reported to avoid RLS update errors
+              const { data: existingReport, error: checkError } = await supabase
+                .from('rat_reports')
+                .select('id')
+                .eq('rat_id', currentRat.id)
+                .eq('reporter_id', user.id)
+                .maybeSingle();
+              if (checkError) throw checkError;
+
+              if (!existingReport) {
+                const { error: insertError } = await supabase
+                  .from('rat_reports')
+                  .insert({
+                    rat_id: currentRat.id,
+                    reporter_id: user.id,
+                    reason: 'user_flag',
+                  });
+                if (insertError) throw insertError;
+              }
 
               // Mark the rat flagged
               const { error: flagError } = await supabase
@@ -147,6 +171,9 @@ export default function RateScreen() {
                 .update({
                   moderation_state: 'flagged',
                   is_flagged: true,
+                  flagged: true,
+                  flagged_by: user.id,
+                  flagged_reason: 'user_flag',
                 })
                 .eq('id', currentRat.id);
 
@@ -168,70 +195,97 @@ export default function RateScreen() {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.container} edges={['top']}>
-        <View style={styles.center}>
-          <ActivityIndicator color="#fff" />
-        </View>
-      </SafeAreaView>
+      <>
+        <SafeAreaView style={styles.container} edges={['top']}>
+          <View style={styles.center}>
+            <ActivityIndicator color="#fff" />
+          </View>
+        </SafeAreaView>
+        <BadgeUnlockedModal
+          visible={!!latestBadge}
+          onClose={clearLatestBadge}
+          name={latestBadge?.name ?? ''}
+          description={latestBadge?.description ?? undefined}
+          slug={latestBadge?.slug ?? 'baby-first-rat'}
+        />
+      </>
     );
   }
 
   if (noMoreRats || !currentRat) {
     return (
-      <SafeAreaView style={styles.container} edges={['top']}>
-        <View style={styles.center}>
-          <Text style={styles.emptyTitle}>That's all...rats!</Text>
-          <Text style={styles.emptyText}>
-            You’ve rated all available approved rats. Come back later.
-          </Text>
-          <TouchableOpacity style={styles.refreshButton} onPress={loadNextRat}>
-            <Text style={styles.refreshButtonText}>Check again</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
+      <>
+        <SafeAreaView style={styles.container} edges={['top']}>
+          <View style={styles.center}>
+            <Text style={styles.emptyTitle}>That's all...rats!</Text>
+            <Text style={styles.emptyText}>
+              You’ve rated all available approved rats. Come back later.
+            </Text>
+            <TouchableOpacity style={styles.refreshButton} onPress={loadNextRat}>
+              <Text style={styles.refreshButtonText}>Check again</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+        <BadgeUnlockedModal
+          visible={!!latestBadge}
+          onClose={clearLatestBadge}
+          name={latestBadge?.name ?? ''}
+          description={latestBadge?.description ?? undefined}
+          slug={latestBadge?.slug ?? 'baby-first-rat'}
+        />
+      </>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <View style={styles.content}>
-        <Text style={styles.title}>{currentRat.title || 'Mystery rat'}</Text>
+    <>
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={styles.content}>
+          <Text style={styles.title}>{currentRat.title || 'Mystery rat'}</Text>
 
-        <View style={styles.imageWrapper}>
-          <Image
-            source={{ uri: currentRat.image_url }}
-            style={styles.image}
-            resizeMode="contain"
-          />
-        </View>
-
-        <View style={styles.ratingPanel}>
-          <Text style={styles.ratingLabel}>How many rats is this rat?</Text>
-          <View style={styles.ratingRow}>
-            {[1, 2, 3].map((r) => (
-              <TouchableOpacity
-                key={r}
-                style={styles.ratingButton}
-                onPress={() => handleRate(r)}
-                disabled={submitting || reporting}
-              >
-                <Text style={styles.ratingButtonText}>{r} 🧀</Text>
-              </TouchableOpacity>
-            ))}
+          <View style={styles.imageWrapper}>
+            <Image
+              source={{ uri: currentRat.image_url }}
+              style={styles.image}
+              resizeMode="contain"
+            />
           </View>
 
-          <TouchableOpacity
-            style={styles.reportButton}
-            onPress={handleReport}
-            disabled={reporting || submitting}
-          >
-            <Text style={styles.reportButtonText}>
-              {reporting ? 'Reporting…' : 'Report this rat'}
-            </Text>
-          </TouchableOpacity>
+          <View style={styles.ratingPanel}>
+            <Text style={styles.ratingLabel}>How many rats is this rat?</Text>
+            <View style={styles.ratingRow}>
+              {[1, 2, 3].map((r) => (
+                <TouchableOpacity
+                  key={r}
+                  style={styles.ratingButton}
+                  onPress={() => handleRate(r)}
+                  disabled={submitting || reporting}
+                >
+                  <Text style={styles.ratingButtonText}>{r} 🧀</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <TouchableOpacity
+              style={styles.reportButton}
+              onPress={handleReport}
+              disabled={reporting || submitting}
+            >
+              <Text style={styles.reportButtonText}>
+                {reporting ? 'Reporting…' : 'Report this rat'}
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
-      </View>
-    </SafeAreaView>
+      </SafeAreaView>
+      <BadgeUnlockedModal
+        visible={!!latestBadge}
+        onClose={clearLatestBadge}
+        name={latestBadge?.name ?? ''}
+        description={latestBadge?.description ?? undefined}
+        slug={latestBadge?.slug ?? 'baby-first-rat'}
+      />
+    </>
   );
 }
 

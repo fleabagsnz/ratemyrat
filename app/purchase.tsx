@@ -1,27 +1,114 @@
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import React, { useState } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  Alert,
+  ActivityIndicator,
+} from 'react-native';
 import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useAuth } from '@/contexts/AuthContext';
 import { X, Palette } from 'lucide-react-native';
+import { useAuth } from '@/contexts/AuthContext';
+import {
+  isPurchaseCancelled,
+  purchaseBloodRed,
+  restoreBloodRedPurchase,
+  syncEntitlementsFromRevenueCat,
+} from '@/lib/revenuecat';
+import { trackEvent } from '@/lib/analytics';
 
 export default function PurchaseScreen() {
-  const { profile } = useAuth();
+  const { profile, refreshProfile } = useAuth();
+  const [busy, setBusy] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   const hasBloodRed = profile?.entitlements?.blood_red || false;
 
-  const handlePurchase = () => {
-    Alert.alert(
-      'RevenueCat Required',
-      'To complete this purchase, you need to export this project and integrate RevenueCat SDK.\n\n' +
-        'Steps:\n' +
-        '1. Export this Expo project\n' +
-        '2. Install RevenueCat SDK: npm install react-native-purchases\n' +
-        '3. Configure RevenueCat with your API key\n' +
-        '4. Set up the blood_red product in RevenueCat dashboard\n' +
-        '5. Implement the purchase flow\n\n' +
-        'See: https://www.revenuecat.com/docs/getting-started/installation/expo',
-      [{ text: 'OK' }]
-    );
+  const handlePurchase = async () => {
+    if (!profile?.id) {
+      Alert.alert('Error', 'You must be signed in to purchase.');
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+
+    try {
+      await trackEvent('purchase_started', { product: 'blood_red' });
+
+      await purchaseBloodRed({
+        profileId: profile.id,
+        currentEntitlements: profile.entitlements,
+      });
+
+      await refreshProfile();
+      await trackEvent('purchase_completed', { product: 'blood_red' });
+
+      Alert.alert(
+        'Unlocked',
+        'Blood red has been added to your drawing palette.'
+      );
+    } catch (err: any) {
+      if (isPurchaseCancelled(err)) {
+        return;
+      }
+      const message = err?.message || 'Could not complete purchase.';
+      setError(message);
+      Alert.alert('Purchase failed', message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRestore = async () => {
+    if (!profile?.id) {
+      Alert.alert('Error', 'You must be signed in to restore purchases.');
+      return;
+    }
+
+    setRestoring(true);
+    setError(null);
+
+    try {
+      const { hasBloodRed: restored } = await restoreBloodRedPurchase({
+        profileId: profile.id,
+        currentEntitlements: profile.entitlements,
+      });
+
+      if (restored) {
+        await refreshProfile();
+        Alert.alert('Restored', 'Blood red has been restored to your palette.');
+      } else {
+        Alert.alert('No purchases found', 'No eligible purchases were found.');
+      }
+    } catch (err: any) {
+      const message = err?.message || 'Could not restore purchases.';
+      setError(message);
+      Alert.alert('Restore failed', message);
+    } finally {
+      setRestoring(false);
+    }
+  };
+
+  const handleSync = async () => {
+    if (!profile?.id) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await syncEntitlementsFromRevenueCat({
+        profileId: profile.id,
+        currentEntitlements: profile.entitlements,
+      });
+      await refreshProfile();
+    } catch (err: any) {
+      const message = err?.message || 'Could not sync entitlements.';
+      setError(message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   if (hasBloodRed) {
@@ -44,6 +131,18 @@ export default function PurchaseScreen() {
             <Text style={styles.ownedText}>
               The blood red color is now available in your drawing palette.
             </Text>
+            {error ? <Text style={styles.errorText}>{error}</Text> : null}
+            <TouchableOpacity
+              style={[styles.restoreButton, styles.syncButton]}
+              onPress={handleSync}
+              disabled={busy}
+            >
+              {busy ? (
+                <ActivityIndicator color="#FFFFFF" />
+              ) : (
+                <Text style={styles.restoreButtonText}>Sync with RevenueCat</Text>
+              )}
+            </TouchableOpacity>
           </View>
         </View>
       </SafeAreaView>
@@ -88,13 +187,28 @@ export default function PurchaseScreen() {
         <TouchableOpacity
           style={styles.purchaseButton}
           onPress={handlePurchase}
+          disabled={busy}
         >
-          <Text style={styles.purchaseButtonText}>Purchase</Text>
+          {busy ? (
+            <ActivityIndicator color="#FFFFFF" />
+          ) : (
+            <Text style={styles.purchaseButtonText}>Purchase</Text>
+          )}
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.restoreButton}>
-          <Text style={styles.restoreButtonText}>Restore Purchases</Text>
+        <TouchableOpacity
+          style={styles.restoreButton}
+          onPress={handleRestore}
+          disabled={restoring || busy}
+        >
+          {restoring ? (
+            <ActivityIndicator color="#FFFFFF" />
+          ) : (
+            <Text style={styles.restoreButtonText}>Restore Purchases</Text>
+          )}
         </TouchableOpacity>
+
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
       </View>
     </SafeAreaView>
   );
@@ -205,5 +319,13 @@ const styles = StyleSheet.create({
     color: '#999999',
     textAlign: 'center',
     lineHeight: 22,
+  },
+  errorText: {
+    color: '#FF5C5C',
+    textAlign: 'center',
+    marginTop: 16,
+  },
+  syncButton: {
+    marginTop: 8,
   },
 });

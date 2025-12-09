@@ -1,5 +1,5 @@
 // app/(tabs)/draw.tsx
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -14,14 +14,15 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { captureRef } from 'react-native-view-shot';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
-import { DrawingCanvas } from '@/components/DrawingCanvas';
-import { Trash2 } from 'lucide-react-native';
+import { DrawingCanvas, DrawingCanvasHandle } from '@/components/DrawingCanvas';
+import { Trash2, RotateCcw } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { useBadgeAwards } from '@/hooks/useBadgeAwards';
 import { BadgeUnlockedModal } from '@/components/BadgeUnlockedModal';
 import type { BadgeSlug } from '@/lib/badges';
+import { bloodRedHex } from '@/lib/revenuecat';
 
-const COLORS = {
+const BASE_COLORS = {
   black: '#000000',
   white: '#FFFFFF',
   grey: '#888888',
@@ -43,13 +44,13 @@ function base64ToUint8Array(base64: string): Uint8Array {
 }
 
 export default function DrawScreen() {
-  const { user } = useAuth();
-  const canvasRef = useRef<View>(null);
+  const { user, profile, refreshProfile } = useAuth();
+  const canvasRef = useRef<DrawingCanvasHandle | null>(null);
 
   const [hasDrawnToday, setHasDrawnToday] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [selectedColor, setSelectedColor] = useState(COLORS.white);
+  const [selectedColor, setSelectedColor] = useState(BASE_COLORS.white);
   const [brushSize, setBrushSize] = useState(BRUSH_SIZES[1]);
   const [title, setTitle] = useState('');
   const [hasAnyStroke, setHasAnyStroke] = useState(false);
@@ -57,15 +58,36 @@ export default function DrawScreen() {
   const [canvasKey, setCanvasKey] = useState(0); // force remount on clear
 
   // BADGE HOOK
-  const { awardBadge, latestBadge, clearLatestBadge } = useBadgeAwards();
+  const { latestBadge, clearLatestBadge, checkDrawBadges, checkStreakBadges } =
+    useBadgeAwards();
+
+  const palette = useMemo(() => {
+    const entries: Record<string, string> = { ...BASE_COLORS };
+    if (profile?.entitlements?.blood_red) {
+      entries.bloodRed = bloodRedHex;
+    }
+    return entries;
+  }, [profile?.entitlements?.blood_red]);
+
+  useEffect(() => {
+    if (!Object.values(palette).includes(selectedColor)) {
+      setSelectedColor(palette.white ?? BASE_COLORS.white);
+    }
+  }, [palette, selectedColor]);
 
   useEffect(() => {
     checkIfDrawnToday();
-  }, []);
+  }, [profile?.is_admin]);
 
   const checkIfDrawnToday = async () => {
     try {
       if (!user?.id) {
+        setHasDrawnToday(false);
+        return;
+      }
+
+      // Admins can draw unlimited times per day
+      if (profile?.is_admin) {
         setHasDrawnToday(false);
         return;
       }
@@ -91,12 +113,102 @@ export default function DrawScreen() {
     setScrollEnabled(true);
   };
 
+  const handleUndo = () => {
+    canvasRef.current?.undo();
+  };
+
+  const updateStreakAfterDraw = useCallback(
+    async (createdAt: string) => {
+      if (!user?.id) return;
+
+      // Normalize to UTC calendar dates to avoid timezone drift
+      const createdAtDate = new Date(createdAt);
+      const createdDateStr = createdAtDate.toISOString().slice(0, 10);
+      const now = new Date();
+      const todayUtc = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+      );
+      const todayStr = todayUtc.toISOString().slice(0, 10);
+
+      // Only count streaks for rats created "today"
+      if (createdDateStr !== todayStr) {
+        return;
+      }
+
+      const todayStartIso = `${todayStr}T00:00:00.000Z`;
+
+      // Skip if a rat was already submitted earlier today (prevents double-counting for admins)
+      const {
+        data: earlierToday,
+        error: earlierTodayError,
+      } = await supabase
+        .from('rats')
+        .select('id')
+        .eq('owner_id', user.id)
+        .gte('created_at', todayStartIso)
+        .lt('created_at', createdAt)
+        .limit(1)
+        .maybeSingle();
+
+      if (earlierTodayError) {
+        console.error('Error checking today streak submissions:', earlierTodayError);
+        return;
+      }
+
+      if (earlierToday) {
+        return;
+      }
+
+      const yesterdayUtc = new Date(todayUtc);
+      yesterdayUtc.setUTCDate(yesterdayUtc.getUTCDate() - 1);
+      const yesterdayStr = yesterdayUtc.toISOString().slice(0, 10);
+
+      const { data: lastRat, error: lastRatError } = await supabase
+        .from('rats')
+        .select('created_at')
+        .eq('owner_id', user.id)
+        .lt('created_at', todayStartIso)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (lastRatError) {
+        console.error('Error finding previous rat for streak:', lastRatError);
+        return;
+      }
+
+      const lastDateStr = lastRat?.created_at
+        ? new Date(lastRat.created_at).toISOString().slice(0, 10)
+        : null;
+
+      const continuedStreak = lastDateStr === yesterdayStr;
+      const newCurrent = continuedStreak ? (profile?.streak_current ?? 0) + 1 : 1;
+      const newBest = Math.max(profile?.streak_best ?? 0, newCurrent);
+
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({
+          streak_current: newCurrent,
+          streak_best: newBest,
+        })
+        .eq('id', user.id);
+
+      if (updateError) {
+        console.error('Error updating streak counts:', updateError);
+        return;
+      }
+
+      await refreshProfile();
+    },
+    [profile?.streak_best, profile?.streak_current, refreshProfile, user?.id]
+  );
+
   const handleSubmit = async () => {
     if (!user) {
       Alert.alert('Error', 'You must be signed in.');
       return;
     }
-    if (!canvasRef.current) {
+    if (!canvasRef.current?.rootRef) {
       Alert.alert('Error', 'Canvas not ready.');
       return;
     }
@@ -109,7 +221,7 @@ export default function DrawScreen() {
 
     try {
       // 1. Capture the canvas as base64 PNG
-      const base64 = await captureRef(canvasRef, {
+      const base64 = await captureRef(canvasRef.current.rootRef, {
         format: 'png',
         quality: 1,
         result: 'base64',
@@ -135,18 +247,27 @@ export default function DrawScreen() {
       const imageUrl = publicUrlData.publicUrl;
 
       // 4. Insert rat row
-      const { error: insertError } = await supabase.from('rats').insert({
-        image_url: imageUrl,
-        title: title.trim() || null,
-        creation_tool: 'png_canvas_v1',
-        moderation_state: 'approved',
-        avg_rating: 0,
-      });
+      const { data: insertedRat, error: insertError } = await supabase
+        .from('rats')
+        .insert({
+          image_url: imageUrl,
+          title: title.trim() || null,
+          creation_tool: 'png_canvas_v1',
+          moderation_state: 'approved',
+          avg_rating: 0,
+        })
+        .select('id, created_at')
+        .single();
 
       if (insertError) throw insertError;
 
-      // 5. Award "Baby's First Rat" badge (slug must exist in `badges.slug`)
-      await awardBadge(user.id, 'baby-first-rat' as BadgeSlug);
+      if (insertedRat?.created_at) {
+        await updateStreakAfterDraw(insertedRat.created_at);
+      }
+
+      // 5. Award draw-based badges and streak-based badges
+      await checkDrawBadges();
+      await checkStreakBadges();
 
       Alert.alert('Success', 'Your rat has been submitted!', [
         {
@@ -201,13 +322,14 @@ export default function DrawScreen() {
             onStroke={() => setHasAnyStroke(true)}
             onDrawingStart={() => setScrollEnabled(false)}
             onDrawingEnd={() => setScrollEnabled(true)}
+            onStrokesChange={(count) => setHasAnyStroke(count > 0)}
           />
         </View>
 
         {/* Colors */}
         <Text style={styles.sectionLabel}>Colour</Text>
         <View style={styles.row}>
-          {Object.entries(COLORS).map(([key, value]) => (
+          {Object.entries(palette).map(([key, value]) => (
             <TouchableOpacity
               key={key}
               style={[
@@ -256,6 +378,9 @@ export default function DrawScreen() {
 
         {/* Clear */}
         <View style={styles.actionRow}>
+          <TouchableOpacity style={styles.iconButton} onPress={handleUndo}>
+            <RotateCcw size={20} color="#fff" />
+          </TouchableOpacity>
           <TouchableOpacity style={styles.iconButton} onPress={handleClear}>
             <Trash2 size={20} color="#fff" />
           </TouchableOpacity>
@@ -327,7 +452,13 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
   },
   sizeButtonActive: { borderColor: '#6B4E2E' },
-  actionRow: { flexDirection: 'row', gap: 12, marginBottom: 16 },
+  actionRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 16,
+    justifyContent: 'flex-end',
+    alignSelf: 'flex-end',
+  },
   iconButton: {
     width: 44,
     height: 44,

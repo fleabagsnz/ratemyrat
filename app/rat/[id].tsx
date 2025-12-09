@@ -24,7 +24,7 @@ type Rat = {
 
 export default function RatDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
 
   const [rat, setRat] = useState<Rat | null>(null);
   const [loading, setLoading] = useState(true);
@@ -35,7 +35,7 @@ export default function RatDetailScreen() {
   useEffect(() => {
     if (!id) return;
     fetchRat(id as string);
-  }, [id]);
+  }, [id, profile?.is_evil]);
 
   const fetchRat = async (ratId: string) => {
     try {
@@ -52,7 +52,13 @@ export default function RatDetailScreen() {
         return;
       }
 
-      // still allow viewing even if flagged, good for admins
+      // If flagged and user is not evil-enabled, bounce out
+      if ((data.moderation_state === 'flagged') && !profile?.is_evil) {
+        Alert.alert('Unavailable', 'This rat has been flagged and removed.');
+        router.replace('/(tabs)');
+        return;
+      }
+
       setRat(data);
 
       if (user?.id) {
@@ -149,6 +155,9 @@ export default function RatDetailScreen() {
                 .update({
                   moderation_state: 'flagged',
                   is_flagged: true,
+                  flagged: true,
+                  flagged_by: user.id,
+                  flagged_reason: 'user_flag',
                 })
                 .eq('id', rat.id);
 

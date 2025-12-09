@@ -17,7 +17,6 @@ import { Award, Flame, ShoppingBag, Shield, LogOut } from 'lucide-react-native';
 export default function SettingsScreen() {
   const { profile, signOut, refreshProfile } = useAuth();
 
-  const [pushEnabled, setPushEnabled] = useState(profile?.push_opt_in ?? true);
   const [evilEnabled, setEvilEnabled] = useState(profile?.is_evil ?? false);
 
   // Live stats
@@ -27,9 +26,8 @@ export default function SettingsScreen() {
 
   // Keep local switches in sync with profile whenever it changes
   useEffect(() => {
-    setPushEnabled(profile?.push_opt_in ?? true);
     setEvilEnabled(profile?.is_evil ?? false);
-  }, [profile?.push_opt_in, profile?.is_evil]);
+  }, [profile?.is_evil]);
 
   const loadStats = useCallback(async () => {
     if (!profile?.id) return;
@@ -80,27 +78,6 @@ export default function SettingsScreen() {
       }
     }, [profile?.id, loadStats])
   );
-
-  const handlePushToggle = async (value: boolean) => {
-    if (!profile?.id) return;
-    const prev = pushEnabled;
-    setPushEnabled(value);
-
-    try {
-      const { error } = await supabase
-        .from('profiles')
-        .update({ push_opt_in: value })
-        .eq('id', profile.id);
-
-      if (error) throw error;
-      await refreshProfile();
-    } catch (error) {
-      console.error('Error updating push settings:', error);
-      // rollback UI if update fails
-      setPushEnabled(prev);
-      Alert.alert('Error', 'Could not update notification settings.');
-    }
-  };
 
   const handleEvilToggle = async (value: boolean) => {
     if (!profile?.id) return;
@@ -224,23 +201,6 @@ export default function SettingsScreen() {
               {!hasBloodRed && <Text style={styles.price}>£4.99</Text>}
             </View>
           </TouchableOpacity>
-        </View>
-
-        {/* NOTIFICATIONS */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Notifications</Text>
-          <View style={styles.card}>
-            <View style={styles.settingRow}>
-              <Text style={styles.settingLabel}>Push Notifications</Text>
-              <Switch
-                value={pushEnabled}
-                onValueChange={handlePushToggle}
-                disabled={!profile}
-                trackColor={{ false: '#333333', true: '#6B4E2E' }}
-                thumbColor="#FFFFFF"
-              />
-            </View>
-          </View>
         </View>
 
         {/* EVIL TAB TOGGLE – buried a little */}

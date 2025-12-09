@@ -19,7 +19,7 @@ type Report = {
   rat_id: string;
   reason: string;
   created_at: string;
-  status: string;
+  status?: string | null;
   rat: {
     id: string;
     title: string | null;
@@ -45,9 +45,8 @@ export default function AdminScreen() {
   const fetchReports = async () => {
     try {
       const { data } = await supabase
-        .from('reports')
+        .from('rat_reports')
         .select('*, rat:rats(*)')
-        .eq('status', 'open')
         .order('created_at', { ascending: false })
         .limit(20);
 
@@ -65,8 +64,8 @@ export default function AdminScreen() {
         .eq('id', ratId);
 
       await supabase
-        .from('reports')
-        .update({ status: 'actioned' })
+        .from('rat_reports')
+        .delete()
         .eq('id', reportId);
 
       Alert.alert('Success', 'Rat approved');
@@ -93,8 +92,8 @@ export default function AdminScreen() {
                 .eq('id', ratId);
 
               await supabase
-                .from('reports')
-                .update({ status: 'actioned' })
+                .from('rat_reports')
+                .delete()
                 .eq('id', reportId);
 
               Alert.alert('Success', 'Rat rejected');
@@ -111,8 +110,8 @@ export default function AdminScreen() {
   const handleDismiss = async (reportId: string) => {
     try {
       await supabase
-        .from('reports')
-        .update({ status: 'dismissed' })
+        .from('rat_reports')
+        .delete()
         .eq('id', reportId);
 
       Alert.alert('Success', 'Report dismissed');

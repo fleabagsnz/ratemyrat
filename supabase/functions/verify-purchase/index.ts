@@ -11,6 +11,18 @@ Deno.serve(async (req: Request) => {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
 
+  // Simple shared-secret check for RevenueCat webhook
+  const expectedSecret = Deno.env.get('REVENUECAT_WEBHOOK_SECRET');
+  const incomingSecret = req.headers.get('x-webhook-secret');
+  if (expectedSecret) {
+    if (!incomingSecret || incomingSecret !== expectedSecret) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+  }
+
   try {
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
@@ -54,8 +66,11 @@ Deno.serve(async (req: Request) => {
       }
 
       // Update entitlements
-      if (product_id === 'blood_red') {
-        const updatedEntitlements = { ...profile.entitlements, blood_red: true };
+      if (product_id === 'ratblood_red') {
+        const updatedEntitlements = {
+          ...profile.entitlements,
+          blood_red: true,
+        };
         await supabase
           .from('profiles')
           .update({ entitlements: updatedEntitlements })

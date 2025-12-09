@@ -61,8 +61,10 @@ export default function WallScreen() {
         )
         // primary filter: only approved + not flagged
         .eq('moderation_state', 'approved')
-        .is('is_flagged', false)
-        .is('flagged', false)
+        .not('is_flagged', 'is', true)
+        .not('flagged', 'is', true)
+        .not('moderation_state', 'eq', 'flagged')
+        .not('moderation_state', 'eq', 'evil')
         .order('created_at', { ascending: false })
         .limit(50);
 

@@ -44,17 +44,14 @@ export default function TabLayout() {
         }}
       />
 
-      {/* Evil tab is ALWAYS declared, but hidden when not enabled */}
       <Tabs.Screen
         name="evil"
         options={{
           title: 'Evil',
-          // remove from deep linking & tab list when disabled
-          href: evilEnabled ? '/(tabs)/evil' : null,
-          // hide the actual button when disabled
-          tabBarButton: evilEnabled ? undefined : () => null,
+          // Remove from tabs + deep links when disabled
+          href: evilEnabled ? undefined : null,
           tabBarIcon: ({ size, color }) =>
-            evilEnabled ? <Skull size={size} color={color} /> : null,
+            evilEnabled ? <Skull size={size} color={color} /> : undefined,
         }}
       />
 

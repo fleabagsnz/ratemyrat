@@ -1,5 +1,5 @@
 // ...existing code...
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useImperativeHandle } from 'react';
 import { View, PanResponder, StyleSheet } from 'react-native';
 import Svg, { Path, Rect } from 'react-native-svg';
 
@@ -12,6 +12,7 @@ export type DrawingCanvasProps = {
   onStroke?: () => void;
   onDrawingStart?: () => void;
   onDrawingEnd?: () => void;
+  onStrokesChange?: (count: number) => void;
 };
 
 type Stroke = {
@@ -20,10 +21,19 @@ type Stroke = {
   d: string;
 };
 
-export const DrawingCanvas = React.forwardRef<View, DrawingCanvasProps>(
-  ({ color, brushSize, tool, onStroke, onDrawingStart, onDrawingEnd }, ref) => {
+export type DrawingCanvasHandle = {
+  undo: () => void;
+  rootRef: View | null;
+};
+
+export const DrawingCanvas = React.forwardRef<DrawingCanvasHandle, DrawingCanvasProps>(
+  (
+    { color, brushSize, tool, onStroke, onDrawingStart, onDrawingEnd, onStrokesChange },
+    ref
+  ) => {
     const [strokes, setStrokes] = useState<Stroke[]>([]);
     const currentPath = useRef<string>('');
+    const viewRef = useRef<View>(null);
 
     // keep latest props in refs so PanResponder handlers always use current values
     const colorRef = useRef(color);
@@ -32,6 +42,7 @@ export const DrawingCanvas = React.forwardRef<View, DrawingCanvasProps>(
     const onStrokeRef = useRef(onStroke);
     const onDrawingStartRef = useRef(onDrawingStart);
     const onDrawingEndRef = useRef(onDrawingEnd);
+    const onStrokesChangeRef = useRef(onStrokesChange);
 
     useEffect(() => { colorRef.current = color; }, [color]);
     useEffect(() => { brushRef.current = brushSize; }, [brushSize]);
@@ -39,6 +50,49 @@ export const DrawingCanvas = React.forwardRef<View, DrawingCanvasProps>(
     useEffect(() => { onStrokeRef.current = onStroke; }, [onStroke]);
     useEffect(() => { onDrawingStartRef.current = onDrawingStart; }, [onDrawingStart]);
     useEffect(() => { onDrawingEndRef.current = onDrawingEnd; }, [onDrawingEnd]);
+    useEffect(() => { onStrokesChangeRef.current = onStrokesChange; }, [onStrokesChange]);
+    useEffect(() => {
+      onStrokesChangeRef.current?.(strokes.length);
+    }, [strokes.length]);
+
+    const touchStartedAt = useRef<{ x: number; y: number } | null>(null);
+    const hasMovedRef = useRef(false);
+
+    const undo = () => {
+      setStrokes((prev) => {
+        if (prev.length === 0) return prev;
+        return prev.slice(0, -1);
+      });
+      currentPath.current = '';
+      hasMovedRef.current = false;
+      touchStartedAt.current = null;
+    };
+
+    const finalizeStroke = () => {
+      setStrokes((prev) => {
+        if (prev.length === 0) return prev;
+        const next = [...prev];
+        const lastIndex = next.length - 1;
+
+        // If the user only tapped (no move events), turn it into a tiny segment
+        // so it renders as a dot instead of being dropped.
+        if (!hasMovedRef.current && touchStartedAt.current) {
+          const { x, y } = touchStartedAt.current;
+          const tinyOffset = 0.1;
+          next[lastIndex] = {
+            ...next[lastIndex],
+            d: `M ${x} ${y} L ${x + tinyOffset} ${y + tinyOffset}`,
+          };
+        }
+
+        return next;
+      });
+
+      currentPath.current = '';
+      hasMovedRef.current = false;
+      touchStartedAt.current = null;
+      onDrawingEndRef.current?.();
+    };
 
     const panResponder = useRef(
       PanResponder.create({
@@ -50,6 +104,8 @@ export const DrawingCanvas = React.forwardRef<View, DrawingCanvasProps>(
           const { locationX, locationY } = evt.nativeEvent;
           const strokeColor = toolRef.current === 'eraser' ? '#000000' : colorRef.current;
           currentPath.current = `M ${locationX} ${locationY}`;
+          touchStartedAt.current = { x: locationX, y: locationY };
+          hasMovedRef.current = false;
           setStrokes((prev) => [
             ...prev,
             {
@@ -64,6 +120,7 @@ export const DrawingCanvas = React.forwardRef<View, DrawingCanvasProps>(
           const { locationX, locationY } = evt.nativeEvent;
           // append to current path string
           currentPath.current += ` L ${locationX} ${locationY}`;
+          hasMovedRef.current = true;
           setStrokes((prev) => {
             if (prev.length === 0) return prev;
             const next = [...prev];
@@ -75,21 +132,21 @@ export const DrawingCanvas = React.forwardRef<View, DrawingCanvasProps>(
           });
         },
         onPanResponderRelease: () => {
-          // drop any degenerate single-point strokes to avoid empty/invalid path rendering
-          setStrokes((prev) => prev.filter((s) => typeof s.d === 'string' && s.d.includes(' L ')));
-          currentPath.current = '';
-          onDrawingEndRef.current?.();
+          finalizeStroke();
         },
         onPanResponderTerminate: () => {
-          setStrokes((prev) => prev.filter((s) => typeof s.d === 'string' && s.d.includes(' L ')));
-          currentPath.current = '';
-          onDrawingEndRef.current?.();
+          finalizeStroke();
         },
       })
     ).current;
 
+    useImperativeHandle(ref, () => ({
+      undo,
+      rootRef: viewRef.current,
+    }));
+
     return (
-      <View ref={ref} style={styles.wrapper} {...panResponder.panHandlers}>
+      <View ref={viewRef} style={styles.wrapper} {...panResponder.panHandlers}>
         <Svg width="100%" height="100%">
           <Rect x={0} y={0} width="100%" height="100%" fill="#000000" />
           {strokes.map((s, idx) => {
